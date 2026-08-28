@@ -133,13 +133,21 @@ jobs:
           upload_and_verify() {
             local file="$1" name="$2" expected_size="$3" expected_sha="$4"
             delete_named_asset "${name}"
-            curl -fsSL --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files" >/dev/null
+            local upload_json="${work}/upload-${name//\//_}.json" upload_status
+            upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")"
+            [[ "${upload_status}" =~ ^2[0-9][0-9]$ ]] || {
+              echo "::error::Gitee attachment upload failed for ${name} (HTTP ${upload_status})" >&2
+              jq -c '{message:.message,error:.error,errors:.errors}' "${upload_json}" >&2 2>/dev/null || head -c 1000 "${upload_json}" >&2 || true
+              return 1
+            }
             local mirror_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/${name}"
             local mirror_file="${work}/verify-${name//\//_}" mirror_size mirror_sha
-            curl -fsSL --retry 4 --retry-all-errors -o "${mirror_file}" "${mirror_url}"
+            local mirror_status
+            mirror_status="$(curl -sS -o "${mirror_file}" -w '%{http_code}' --retry 4 --retry-all-errors "${mirror_url}")"
+            [[ "${mirror_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Gitee attachment verification download failed for ${name} (HTTP ${mirror_status})" >&2; return 1; }
             mirror_size="$(stat -c '%s' "${mirror_file}")"
             mirror_sha="$(sha256sum "${mirror_file}" | awk '{print tolower($1)}')"
-            [[ "${mirror_size}" == "${expected_size}" && "${mirror_sha}" == "${expected_sha,,}" ]] || { echo "::error::Gitee checksum mismatch: ${name}"; exit 1; }
+            [[ "${mirror_size}" == "${expected_size}" && "${mirror_sha}" == "${expected_sha,,}" ]] || { echo "::error::Gitee checksum mismatch: ${name}" >&2; return 1; }
             printf '%s\n' "${mirror_url}"
           }
 
