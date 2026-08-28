@@ -42,7 +42,10 @@ $candidates = foreach ($candidate in @($item.URLS)) {
         [pscustomobject]@{ Url = $normalized; Size = 0L }
     }
 }
-$selected = $candidates | Where-Object { $_.Url -match '\?P1=' } | Select-Object -First 1
+$selected = $candidates | Where-Object { ([uri]$_.Url).Host -eq 'dl.delivery.mp.microsoft.com' } | Select-Object -First 1
+if ($null -eq $selected) {
+    $selected = $candidates | Where-Object { $_.Url -match '\?P1=' } | Select-Object -First 1
+}
 if ($null -eq $selected) { $selected = $candidates | Sort-Object Size -Descending | Select-Object -First 1 }
 if ($null -eq $selected -or [string]::IsNullOrWhiteSpace($selected.Url)) { throw 'Microsoft Store returned no downloadable MSIX URL.' }
 
