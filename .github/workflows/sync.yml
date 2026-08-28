@@ -5,6 +5,10 @@ on:
     - cron: "17,47 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: z8-codex-mirror-sync
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -18,9 +22,17 @@ jobs:
       matrix:
         project:
           - id: codex-desktop
-            label: Codex Desktop
+            label: Codex Desktop Windows x64
             gitee_repo: codex-mirror
-            asset_mode: codex_desktop
+            asset_mode: codex_desktop_x64
+          - id: codex-desktop-arm64
+            label: Codex Desktop Windows arm64
+            gitee_repo: codex-mirror-arm64
+            asset_mode: codex_desktop_arm64
+          - id: codex-desktop-macos
+            label: Codex Desktop macOS
+            gitee_repo: codex-mirror-macos
+            asset_mode: codex_desktop_macos
           - id: codexplusplus
             label: CodexPlusPlus
             upstream: BigPizzaV3/CodexPlusPlus
@@ -68,19 +80,29 @@ jobs:
             release_url='https://openai.com/codex/for-work/'
             store_url='https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
             desktop_version=''
-            for architecture in x64 arm64; do
-              if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}")"; then
-                msix_name="Codex-windows-${architecture}.msix"
-                selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
-                if [[ "${architecture}" == 'x64' ]]; then
+            case "${ASSET_MODE}" in
+              codex_desktop_x64|codex_desktop_arm64)
+                architecture="${ASSET_MODE##*_}"
+                if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}")"; then
+                  msix_name="Codex-windows-${architecture}.msix"
+                  selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
                   desktop_version="$(jq -r '.version // empty' <<<"${resolved}")"
+                else
+                  echo "::error::Microsoft Store did not expose a stable ${architecture} Codex package"
+                  exit 1
                 fi
-              else
-                echo "::warning::Microsoft Store did not expose a stable ${architecture} Codex package; continuing without it"
-              fi
-            done
-            selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' --arg intel 'https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,upstream_url:$arm,expected_size:0,expected_sha:""},{name:"Codex-mac-x64.dmg",source_url:$intel,upstream_url:$intel,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
-            [[ "$(jq 'length' <<<"${selected_assets}")" -ge 3 ]] || { echo "::error::No Codex Desktop package was resolved"; exit 1; }
+                ;;
+              codex_desktop_macos)
+                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' --arg intel 'https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,upstream_url:$arm,expected_size:0,expected_sha:""},{name:"Codex-mac-x64.dmg",source_url:$intel,upstream_url:$intel,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
+                ;;
+              *)
+                echo "::error::Unsupported desktop asset mode: ${ASSET_MODE}"
+                exit 1
+                ;;
+            esac
+            required_assets=1
+            [[ "${ASSET_MODE}" == 'codex_desktop_macos' ]] && required_assets=2
+            [[ "$(jq 'length' <<<"${selected_assets}")" -ge "${required_assets}" ]] || { echo "::error::No Codex Desktop package was resolved"; exit 1; }
             if [[ -n "${desktop_version}" ]]; then
               version="${desktop_version}"
             else
@@ -90,6 +112,19 @@ jobs:
           fi
 
           [[ "${version}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid mirror version"; exit 1; }
+
+          ensure_master_branch() {
+            local branch_status bootstrap_payload bootstrap_content
+            branch_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "${auth}" "${api}/branches/master")"
+            [[ "${branch_status}" == 200 ]] && return 0
+            [[ "${branch_status}" == 404 ]] || { echo "::error::Unable to inspect Gitee master branch (HTTP ${branch_status})"; return 1; }
+            bootstrap_content="WjggTGF1bmNoIG1pcnJvciBib290c3RyYXAuCg=="
+            bootstrap_payload="$(jq -n --arg message 'initialize Z8 Launch mirror' --arg content "${bootstrap_content}" --arg branch master '{message:$message,content:$content,branch:$branch}')"
+            curl -fsSL --retry 4 --retry-all-errors -X PUT -H "${auth}" -H 'Content-Type: application/json' -d "${bootstrap_payload}" "${api}/contents/.z8-launch-mirror" >/dev/null
+          }
+
+          ensure_master_branch
+
           release_json="${work}/release.json"
           status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
           if [[ "${status}" == 200 ]]; then
@@ -120,6 +155,19 @@ jobs:
             exit 1
           fi
           [[ "${release_id}" =~ ^[0-9]+$ ]] || { echo "::error::Invalid Gitee release id"; exit 1; }
+
+          delete_all_assets() {
+            local list id existing
+            list="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
+            while IFS=$'\t' read -r id existing; do
+              [[ -n "${id}" && "${id}" != null ]] || continue
+              curl -fsSL --retry 4 --retry-all-errors -X DELETE -H "${auth}" "${api}/releases/${release_id}/attach_files/${id}" >/dev/null
+            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${list}")
+          }
+
+          # A failed run can leave a partial set of chunks. Start each release
+          # refresh from an empty attachment list so the manifest is atomic.
+          delete_all_assets
 
           delete_named_asset() {
             local name="$1" list id existing
