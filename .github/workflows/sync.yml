@@ -158,8 +158,14 @@ jobs:
             [[ -z "${expected_sha}" || "${actual_sha}" == "${expected_sha,,}" ]] || { echo "::error::Upstream checksum mismatch: ${name}"; exit 1; }
 
             parts='[]'
+            published_name="${name}"
+            if [[ "${ASSET_MODE}" == "codexplusplus" && "${name}" == *windows-x64-setup.exe ]]; then
+              # Gitee rejects executable attachment names; preserve the bytes
+              # and let Z8 Launch restore the logical .exe filename locally.
+              published_name="${name}.bin"
+            fi
             if (( actual_size <= CHUNK_BYTES )); then
-              mirror_url="$(upload_and_verify "${file}" "${name}" "${actual_size}" "${actual_sha}")"
+              mirror_url="$(upload_and_verify "${file}" "${published_name}" "${actual_size}" "${actual_sha}")"
               parts="$(jq -c --arg filename "${name}" --arg url "${mirror_url}" --argjson size "${actual_size}" --arg sha "${actual_sha}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha}]' <<<"${parts}")"
             else
               chunk_dir="${work}/chunks-${name}"
