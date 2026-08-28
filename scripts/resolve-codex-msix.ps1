@@ -30,12 +30,13 @@ $item = $items | Where-Object { $_.FileName -match "OpenAI\.Codex_(?<version>\d+
 if ($null -eq $item) { throw "Microsoft Store returned no OpenAI.Codex $Architecture MSIX." }
 
 $candidates = foreach ($candidate in @($item.URLS)) {
+    $normalized = ([string]$candidate) -replace '^http://', 'https://'
     try {
-        $head = Invoke-WebRequest -Uri $candidate -Method Head
+        $head = Invoke-WebRequest -Uri $normalized -Method Head
         $length = [long]$head.Headers['Content-Length']
-        [pscustomobject]@{ Url = [string]$candidate; Size = $length }
+        [pscustomobject]@{ Url = $normalized; Size = $length }
     } catch {
-        [pscustomobject]@{ Url = [string]$candidate; Size = 0L }
+        [pscustomobject]@{ Url = $normalized; Size = 0L }
     }
 }
 $selected = $candidates | Where-Object { $_.Url -match '\?P1=' } | Select-Object -First 1

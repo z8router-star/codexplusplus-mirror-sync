@@ -93,7 +93,7 @@ jobs:
                 fi
                 ;;
               codex_desktop_macos)
-                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' --arg intel 'https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,upstream_url:$arm,expected_size:0,expected_sha:""},{name:"Codex-mac-x64.dmg",source_url:$intel,upstream_url:$intel,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
+                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,upstream_url:$arm,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
                 ;;
               *)
                 echo "::error::Unsupported desktop asset mode: ${ASSET_MODE}"
@@ -101,7 +101,7 @@ jobs:
                 ;;
             esac
             required_assets=1
-            [[ "${ASSET_MODE}" == 'codex_desktop_macos' ]] && required_assets=2
+            [[ "${ASSET_MODE}" == 'codex_desktop_macos' ]] && required_assets=1
             [[ "$(jq 'length' <<<"${selected_assets}")" -ge "${required_assets}" ]] || { echo "::error::No Codex Desktop package was resolved"; exit 1; }
             if [[ -n "${desktop_version}" ]]; then
               version="${desktop_version}"
