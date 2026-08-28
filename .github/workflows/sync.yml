@@ -109,7 +109,7 @@ jobs:
             release_id="$(jq -r '.id // .release.id // .data.id // empty' "${create_json}")"
             if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
               echo "::error::Gitee release creation failed (HTTP ${create_status})"
-              jq -c 'del(.message,.detail,.error,.errors)' "${create_json}" 2>/dev/null || true
+              jq -c '{keys:(keys // []),id:.id,message:.message,detail:.detail,error:.error,errors:.errors}' "${create_json}" 2>/dev/null || head -c 1000 "${create_json}" || true
             fi
           else
             cat "${release_json}"
