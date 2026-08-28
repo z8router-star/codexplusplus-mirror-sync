@@ -191,7 +191,7 @@ jobs:
             local mirror_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/${name}"
             local mirror_file="${work}/verify-${name//\//_}" mirror_size mirror_sha
             local mirror_status
-            mirror_status="$(curl -sS -o "${mirror_file}" -w '%{http_code}' --retry 4 --retry-all-errors "${mirror_url}")"
+            mirror_status="$(curl -sS -L -o "${mirror_file}" -w '%{http_code}' --retry 4 --retry-all-errors "${mirror_url}")"
             [[ "${mirror_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Gitee attachment verification download failed for ${name} (HTTP ${mirror_status})" >&2; return 1; }
             mirror_size="$(stat -c '%s' "${mirror_file}")"
             mirror_sha="$(sha256sum "${mirror_file}" | awk '{print tolower($1)}')"
