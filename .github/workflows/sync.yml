@@ -93,8 +93,10 @@ jobs:
           release_json="${work}/release.json"
           status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
           if [[ "${status}" == 200 ]]; then
-            release_id="$(jq -r '.id' "${release_json}")"
-          elif [[ "${status}" == 404 ]]; then
+            release_id="$(jq -r '.id // empty' "${release_json}")"
+            [[ "${release_id}" =~ ^[0-9]+$ ]] || status=404
+          fi
+          if [[ "${status}" == 404 ]]; then
             tag_json="${work}/tag.json"
             tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
             if [[ "${tag_status}" == 404 ]]; then
@@ -111,6 +113,8 @@ jobs:
               echo "::error::Gitee release creation failed (HTTP ${create_status})"
               jq -c '{keys:(keys // []),id:.id,message:.message,detail:.detail,error:.error,errors:.errors}' "${create_json}" 2>/dev/null || head -c 1000 "${create_json}" || true
             fi
+          elif [[ "${release_id}" =~ ^[0-9]+$ ]]; then
+            :
           else
             cat "${release_json}"
             exit 1
