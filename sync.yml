@@ -1,0 +1,206 @@
+name: Sync Codex releases to Gitee
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Mirror ${{ matrix.project.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - id: codex
+            label: Codex
+            upstream: openai/codex
+            gitee_repo: codex-mirror
+            tag_prefix: rust-v
+            asset_mode: codex
+          - id: codexplusplus
+            label: CodexPlusPlus
+            upstream: BigPizzaV3/CodexPlusPlus
+            gitee_repo: codexplusplus-mirror
+            tag_prefix: v
+            asset_mode: codexplusplus
+    env:
+      GITEE_OWNER: z8hk
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      UPSTREAM_REPO: ${{ matrix.project.upstream }}
+      GITEE_REPO: ${{ matrix.project.gitee_repo }}
+      TAG_PREFIX: ${{ matrix.project.tag_prefix }}
+      ASSET_MODE: ${{ matrix.project.asset_mode }}
+      CHUNK_BYTES: "47185920"
+    steps:
+      - name: Verify and publish latest stable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GITEE_TOKEN:?Set the GITEE_TOKEN repository secret first}"
+
+          case "${ASSET_MODE}" in
+            codex)
+              asset_filter='[.assets[] | select(.name == "codex-x86_64-pc-windows-msvc.exe" or .name == "codex-aarch64-pc-windows-msvc.exe" or .name == "codex-x86_64-apple-darwin.dmg" or .name == "codex-aarch64-apple-darwin.dmg")]'
+              ;;
+            codexplusplus)
+              asset_filter='[.assets[] | select(.name | startswith("CodexPlusPlus-"))]'
+              ;;
+            *)
+              echo "::error::Unknown asset mode: ${ASSET_MODE}"
+              exit 1
+              ;;
+          esac
+
+          upstream="$(curl -fsSL --retry 4 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest")"
+          jq -e '.draft == false and .prerelease == false' <<<"${upstream}" >/dev/null
+          tag="$(jq -r '.tag_name // empty' <<<"${upstream}")"
+          version="${tag#${TAG_PREFIX}}"
+          release_url="$(jq -r '.html_url // empty' <<<"${upstream}")"
+          [[ "${tag}" =~ ^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Unstable or invalid upstream tag: ${tag}"
+            exit 1
+          }
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Invalid release version: ${version}"
+            exit 1
+          }
+
+          selected_assets="$(jq -c "${asset_filter}" <<<"${upstream}")"
+          asset_count="$(jq 'length' <<<"${selected_assets}")"
+          (( asset_count > 0 )) || {
+            echo "::error::No supported assets in ${UPSTREAM_REPO} ${tag}"
+            exit 1
+          }
+
+          api="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
+          auth="Authorization: token ${GITEE_TOKEN}"
+          release_json="$(mktemp)"
+          status="$(curl -sS -o "${release_json}" -w "%{http_code}" -H "${auth}" "${api}/releases/tags/${tag}")"
+          if [[ "${status}" == 200 ]]; then
+            release_id="$(jq -r '.id' "${release_json}")"
+          elif [[ "${status}" == 404 ]]; then
+            body="Mirrored from ${release_url}. Official asset bytes are SHA-256 verified before upload. Large files are split below the free Gitee per-file limit; see manifest.json."
+            payload="$(jq -n --arg tag "${tag}" --arg name "${{ matrix.project.label }} ${version}" --arg body "${body}" '{tag_name:$tag,name:$name,body:$body,target_commitish:"master",prerelease:false}')"
+            release_id="$(curl -fsSL --retry 4 --retry-all-errors -X POST -H "${auth}" -H "Content-Type: application/json" -d "${payload}" "${api}/releases" | jq -r '.id')"
+          else
+            cat "${release_json}"
+            exit 1
+          fi
+          [[ "${release_id}" =~ ^[0-9]+$ ]] || { echo "::error::Invalid Gitee release id"; exit 1; }
+
+          delete_named_asset() {
+            local name="$1" list id existing
+            list="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
+            while IFS=$'\t' read -r id existing; do
+              [[ -n "${id}" && "${id}" != null ]] || continue
+              if [[ "${existing}" == "${name}" ]]; then
+                curl -fsSL --retry 4 --retry-all-errors -X DELETE -H "${auth}" "${api}/releases/${release_id}/attach_files/${id}" >/dev/null
+              fi
+            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${list}")
+          }
+
+          delete_previous_manifest_assets() {
+            local previous="${1}" old_manifest old_parts name
+            old_manifest="$(mktemp)"
+            if curl -fsSL --retry 4 --retry-all-errors -o "${old_manifest}" "${previous}"; then
+              old_parts="$(jq -r '.assets[]?.parts[]?.filename // empty' "${old_manifest}" 2>/dev/null || true)"
+              while IFS= read -r name; do
+                [[ -n "${name}" ]] && delete_named_asset "${name}"
+              done <<<"${old_parts}"
+            fi
+            rm -f "${old_manifest}"
+            delete_named_asset "manifest.json"
+          }
+
+          upload_and_verify() {
+            local file="$1" name="$2" expected_size="$3" expected_sha="$4"
+            delete_named_asset "${name}"
+            curl -fsSL --retry 4 --retry-all-errors -X POST -H "${auth}" \
+              -F "file=@${file};filename=${name}" \
+              "${api}/releases/${release_id}/attach_files" >/dev/null
+            local mirror_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/${name}"
+            local mirror_file mirror_size mirror_sha
+            mirror_file="$(mktemp)"
+            curl -fsSL --retry 4 --retry-all-errors -o "${mirror_file}" "${mirror_url}"
+            mirror_size="$(stat -c '%s' "${mirror_file}")"
+            mirror_sha="$(sha256sum "${mirror_file}" | awk '{print tolower($1)}')"
+            [[ "${mirror_size}" == "${expected_size}" && "${mirror_sha}" == "${expected_sha,,}" ]] || {
+              echo "::error::Gitee checksum mismatch: ${name}"
+              exit 1
+            }
+            rm -f "${mirror_file}"
+            printf '%s\n' "${mirror_url}"
+          }
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+          delete_previous_manifest_assets "https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/manifest.json"
+          manifest_assets='[]'
+          while IFS= read -r asset; do
+            name="$(jq -r '.name' <<<"${asset}")"
+            source_url="$(jq -r '.browser_download_url // empty' <<<"${asset}")"
+            expected_size="$(jq -r '.size // 0' <<<"${asset}")"
+            expected_sha="$(jq -r '.digest // empty' <<<"${asset}")"
+            expected_sha="${expected_sha#sha256:}"
+            [[ "${source_url}" == "https://github.com/${UPSTREAM_REPO}/releases/download/${tag}/"* ]] || {
+              echo "::error::Untrusted upstream URL for ${name}"
+              exit 1
+            }
+            [[ "${expected_size}" =~ ^[1-9][0-9]*$ && "${expected_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+              echo "::error::Invalid upstream metadata for ${name}"
+              exit 1
+            }
+
+            source_file="${work}/${name}"
+            curl -fsSL --retry 4 --retry-all-errors -H "Accept: application/octet-stream" -o "${source_file}" "${source_url}"
+            actual_size="$(stat -c '%s' "${source_file}")"
+            actual_sha="$(sha256sum "${source_file}" | awk '{print tolower($1)}')"
+            [[ "${actual_size}" == "${expected_size}" && "${actual_sha}" == "${expected_sha,,}" ]] || {
+              echo "::error::Upstream checksum mismatch: ${name}"
+              exit 1
+            }
+
+            parts='[]'
+            if (( expected_size <= CHUNK_BYTES )); then
+              mirror_url="$(upload_and_verify "${source_file}" "${name}" "${expected_size}" "${expected_sha}")"
+              parts="$(jq -c --arg filename "${name}" --arg url "${mirror_url}" --argjson size "${expected_size}" --arg sha "${expected_sha,,}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha}]' <<<"${parts}")"
+            else
+              chunk_dir="${work}/chunks-${name}"
+              mkdir -p "${chunk_dir}"
+              split -b "${CHUNK_BYTES}" -d -a 4 "${source_file}" "${chunk_dir}/part-"
+              index=1
+              for chunk in "${chunk_dir}"/part-*; do
+                chunk_name="${name}.part-$(printf '%04d' "${index}")"
+                chunk_size="$(stat -c '%s' "${chunk}")"
+                chunk_sha="$(sha256sum "${chunk}" | awk '{print tolower($1)}')"
+                mirror_url="$(upload_and_verify "${chunk}" "${chunk_name}" "${chunk_size}" "${chunk_sha}")"
+                parts="$(jq -c --arg filename "${chunk_name}" --arg url "${mirror_url}" --argjson size "${chunk_size}" --arg sha "${chunk_sha}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha}]' <<<"${parts}")"
+                index=$((index + 1))
+              done
+            fi
+            manifest_assets="$(jq -c --arg filename "${name}" --arg sourceUrl "${source_url}" --argjson size "${expected_size}" --arg sha "${expected_sha,,}" --argjson parts "${parts}" '. + [{filename:$filename,upstreamUrl:$sourceUrl,sizeBytes:$size,sha256:$sha,parts:$parts}]' <<<"${manifest_assets}")"
+          done < <(jq -c '.[]' <<<"${selected_assets}")
+
+          manifest="${work}/manifest.json"
+          jq -n \
+            --arg upstream "${UPSTREAM_REPO}" \
+            --arg tag "${tag}" \
+            --arg version "${version}" \
+            --arg releaseUrl "${release_url}" \
+            --arg mirrorRepo "${GITEE_OWNER}/${GITEE_REPO}" \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson assets "${manifest_assets}" \
+            '{schemaVersion:2,upstreamRepository:$upstream,tag:$tag,version:$version,upstreamReleaseUrl:$releaseUrl,mirrorRepository:$mirrorRepo,generatedAt:$generatedAt,assets:$assets}' > "${manifest}"
+          manifest_size="$(stat -c '%s' "${manifest}")"
+          manifest_sha="$(sha256sum "${manifest}" | awk '{print tolower($1)}')"
+          upload_and_verify "${manifest}" "manifest.json" "${manifest_size}" "${manifest_sha}" >/dev/null
+          echo "Synced ${UPSTREAM_REPO} ${tag} to https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/tag/${tag}"
