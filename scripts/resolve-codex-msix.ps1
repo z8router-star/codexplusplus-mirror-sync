@@ -14,7 +14,7 @@ $PSDefaultParameterValues['Invoke-WebRequest:SkipCertificateCheck'] = $true
 
 # Reuse the public Microsoft Store resolver logic to obtain a time-limited
 # Microsoft CDN URL; only the resulting official URL is consumed below.
-$archive = Join-Path ([IO.Path]::GetTempPath()) 'z8-get-msstoreinstaller.nupkg'
+$archive = Join-Path ([IO.Path]::GetTempPath()) 'z8-get-msstoreinstaller.zip'
 $extract = Join-Path ([IO.Path]::GetTempPath()) 'z8-get-msstoreinstaller'
 Invoke-WebRequest -Uri 'https://www.powershellgallery.com/api/v2/package/Get-MSStoreInstaller/1.0.1' -OutFile $archive
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
@@ -30,7 +30,10 @@ $item = $items | Where-Object { $_.FileName -match "OpenAI\.Codex_(?<version>\d+
 if ($null -eq $item) { throw "Microsoft Store returned no OpenAI.Codex $Architecture MSIX." }
 
 $candidates = foreach ($candidate in @($item.URLS)) {
-    $normalized = ([string]$candidate) -replace '^http://', 'https://'
+    # The Store service currently emits HTTP CDN URLs. Keep the resolver's
+    # original protocol; the workflow will retry the alternate protocol when
+    # a hosted runner cannot reach one of the CDN endpoints.
+    $normalized = [string]$candidate
     try {
         $head = Invoke-WebRequest -Uri $normalized -Method Head
         $length = [long]$head.Headers['Content-Length']

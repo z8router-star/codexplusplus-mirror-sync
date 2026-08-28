@@ -184,8 +184,28 @@ jobs:
             # Microsoft CDN occasionally presents an incomplete public chain
             # to hosted Linux runners. The MSIX is still checked by its exact
             # bytes and Windows Authenticode policy before Z8 Launch installs it.
-            [[ "${url}" == https://*.dl.delivery.mp.microsoft.com/* ]] && options+=(--insecure)
-            curl "${options[@]}" -o "${file}" "${url}"
+            if [[ "${url}" == *dl.delivery.mp.microsoft.com/* ]]; then
+              options+=(--insecure)
+              if curl "${options[@]}" -o "${file}" "${url}"; then
+                return 0
+              fi
+              # Store currently returns HTTP URLs. Retry the alternate
+              # protocol because some runner egress paths reject one side.
+              local alternate="${url}"
+              if [[ "${url}" == https://* ]]; then
+                alternate="http://${url#https://}"
+              elif [[ "${url}" == http://* ]]; then
+                alternate="https://${url#http://}"
+              fi
+              curl "${options[@]}" -o "${file}" "${alternate}"
+              return $?
+            fi
+            if curl "${options[@]}" -o "${file}" "${url}"; then
+              return 0
+            fi
+            # Keep a small query-string fallback for static assets whose edge
+            # cache occasionally returns a transient 404 for the bare path.
+            curl "${options[@]}" -o "${file}" "${url}?download=1"
           }
 
           upload_and_verify() {
@@ -229,7 +249,6 @@ jobs:
               # Gitee rejects executable attachment names; preserve the bytes
               # and let Z8 Launch restore the logical .exe filename locally.
               published_name="${name%.exe}.payload"
-              delete_named_asset "${name}.bin"
             fi
             if (( actual_size <= CHUNK_BYTES )); then
               mirror_url="$(upload_and_verify "${file}" "${published_name}" "${actual_size}" "${actual_sha}")"
