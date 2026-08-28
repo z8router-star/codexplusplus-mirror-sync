@@ -69,7 +69,7 @@ jobs:
             store_url='https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
             desktop_version=''
             for architecture in x64 arm64; do
-              if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}" 2>/dev/null)"; then
+              if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}")"; then
                 msix_name="Codex-windows-${architecture}.msix"
                 selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
                 if [[ "${architecture}" == 'x64' ]]; then
