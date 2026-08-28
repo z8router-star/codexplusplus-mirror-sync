@@ -162,7 +162,8 @@ jobs:
             if [[ "${ASSET_MODE}" == "codexplusplus" && "${name}" == *windows-x64-setup.exe ]]; then
               # Gitee rejects executable attachment names; preserve the bytes
               # and let Z8 Launch restore the logical .exe filename locally.
-              published_name="${name}.bin"
+              published_name="${name%.exe}.payload"
+              delete_named_asset "${name}.bin"
             fi
             if (( actual_size <= CHUNK_BYTES )); then
               mirror_url="$(upload_and_verify "${file}" "${published_name}" "${actual_size}" "${actual_sha}")"
