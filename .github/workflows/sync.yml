@@ -205,7 +205,9 @@ jobs:
             fi
             # Keep a small query-string fallback for static assets whose edge
             # cache occasionally returns a transient 404 for the bare path.
-            curl "${options[@]}" -o "${file}" "${url}?download=1"
+            local separator='?'
+            [[ "${url}" == *\?* ]] && separator='&'
+            curl "${options[@]}" -o "${file}" "${url}${separator}download=1"
           }
 
           upload_and_verify() {
@@ -282,7 +284,11 @@ jobs:
             '{schemaVersion:2,upstreamRepository:$upstream,tag:$tag,version:$version,upstreamReleaseUrl:$releaseUrl,mirrorRepository:$mirrorRepo,generatedAt:$generatedAt,assets:$assets}' > "${manifest}"
           manifest_size="$(stat -c '%s' "${manifest}")"
           manifest_sha="$(sha256sum "${manifest}" | awk '{print tolower($1)}')"
-          upload_and_verify "${manifest}" "manifest.json" "${manifest_size}" "${manifest_sha}" >/dev/null
+          # latest.json is the authoritative manifest consumed by Z8 Launch.
+          # Keep it in the repository rather than as a release attachment;
+          # Gitee's attachment CDN can reject small JSON files after a large
+          # upload even though all binary chunks have verified successfully.
+          echo "Manifest SHA-256: ${manifest_sha} (${manifest_size} bytes)"
 
           content="$(base64 -w0 "${manifest}")"
           existing="$(curl -sS -H "${auth}" "${api}/contents/latest.json?ref=master")"
