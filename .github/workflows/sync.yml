@@ -178,6 +178,16 @@ jobs:
             done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${list}")
           }
 
+          download_upstream_asset() {
+            local url="$1" file="$2"
+            local -a options=(-fsSL --retry 4 --retry-all-errors -A 'Mozilla/5.0 (Z8-Launch mirror sync)' -e 'https://openai.com/codex/for-work/')
+            # Microsoft CDN occasionally presents an incomplete public chain
+            # to hosted Linux runners. The MSIX is still checked by its exact
+            # bytes and Windows Authenticode policy before Z8 Launch installs it.
+            [[ "${url}" == https://*.dl.delivery.mp.microsoft.com/* ]] && options+=(--insecure)
+            curl "${options[@]}" -o "${file}" "${url}"
+          }
+
           upload_and_verify() {
             local file="$1" name="$2" expected_size="$3" expected_sha="$4"
             delete_named_asset "${name}"
@@ -206,7 +216,7 @@ jobs:
             expected_size="$(jq -r '.expected_size' <<<"${asset}")"
             expected_sha="$(jq -r '.expected_sha' <<<"${asset}")"
             file="${work}/${name}"
-            curl -fsSL --retry 4 --retry-all-errors -o "${file}" "${source_url}"
+            download_upstream_asset "${source_url}" "${file}"
             actual_size="$(stat -c '%s' "${file}")"
             actual_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
             [[ "${actual_size}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Empty upstream asset: ${name}"; exit 1; }
