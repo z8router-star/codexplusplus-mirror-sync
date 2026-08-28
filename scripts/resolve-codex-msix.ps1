@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# The FE3 endpoint currently serves an incomplete chain on GitHub's Linux
+# runner. The package is still verified after download by its MSIX signature.
+$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
+$PSDefaultParameterValues['Invoke-WebRequest:SkipCertificateCheck'] = $true
 
 # Reuse the public Microsoft Store resolver logic to obtain a time-limited
 # Microsoft CDN URL; only the resulting official URL is consumed below.
