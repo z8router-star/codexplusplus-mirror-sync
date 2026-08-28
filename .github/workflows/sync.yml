@@ -95,9 +95,22 @@ jobs:
           if [[ "${status}" == 200 ]]; then
             release_id="$(jq -r '.id' "${release_json}")"
           elif [[ "${status}" == 404 ]]; then
+            tag_json="${work}/tag.json"
+            tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
+            if [[ "${tag_status}" == 404 ]]; then
+              tag_payload="$(jq -n --arg tag "${tag}" --arg refs master '{tag_name:$tag,refs:$refs}')"
+              tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${tag_payload}" "${api}/tags")"
+            fi
+            [[ "${tag_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Unable to ensure Gitee tag ${tag} (HTTP ${tag_status})"; jq -c 'del(.message,.detail)' "${tag_json}" 2>/dev/null || true; exit 1; }
             body="Mirrored official bytes from ${release_url}. Every asset is SHA-256 verified before upload; large files are split below Gitee's per-file limit and described in latest.json."
             payload="$(jq -n --arg tag "${tag}" --arg name "${{ matrix.project.label }} ${version}" --arg body "${body}" '{tag_name:$tag,name:$name,body:$body,target_commitish:"master",prerelease:false}')"
-            release_id="$(curl -fsSL --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/releases" | jq -r '.id')"
+            create_json="${work}/create-release.json"
+            create_status="$(curl -sS -o "${create_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/releases")"
+            release_id="$(jq -r '.id // .release.id // .data.id // empty' "${create_json}")"
+            if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
+              echo "::error::Gitee release creation failed (HTTP ${create_status})"
+              jq -c 'del(.message,.detail,.error,.errors)' "${create_json}" 2>/dev/null || true
+            fi
           else
             cat "${release_json}"
             exit 1
