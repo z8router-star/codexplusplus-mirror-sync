@@ -1,0 +1,76 @@
+name: Verify Gitee API attachment path
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-attachment-upload:
+    name: Upload and verify a bounded Gitee probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+    steps:
+      - name: Create, upload, and redownload probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GITEE_TOKEN:?Set the GITEE_TOKEN repository secret first}"
+
+          api='https://gitee.com/api/v5/repos/z8hk/codex-mirror'
+          auth="Authorization: token ${GITEE_TOKEN}"
+          tag='z8-api-upload-smoke'
+          asset_name='z8-api-upload-probe.bin'
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+
+          release_json="${work}/release.json"
+          status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
+          if [[ "${status}" == '404' ]]; then
+            tag_json="${work}/tag.json"
+            tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
+            if [[ "${tag_status}" == '404' ]]; then
+              tag_payload="$(jq -n --arg tag "${tag}" '{tag_name:$tag,refs:"master"}')"
+              tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${tag_payload}" "${api}/tags")"
+            fi
+            [[ "${tag_status}" =~ ^2[0-9][0-9]$ ]]
+
+            release_payload="$(jq -n --arg tag "${tag}" '{tag_name:$tag,name:"Z8 Gitee API upload probe",body:"Temporary bounded probe for the Z8 domestic mirror transport.",target_commitish:"master",prerelease:true}')"
+            status="$(curl -sS -o "${release_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${release_payload}" "${api}/releases")"
+          fi
+          [[ "${status}" =~ ^2[0-9][0-9]$ ]]
+          release_id="$(jq -r '.id // .release.id // .data.id // empty' "${release_json}")"
+          [[ "${release_id}" =~ ^[0-9]+$ ]]
+
+          existing="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
+          while IFS=$'\t' read -r id name; do
+            [[ -n "${id}" && "${id}" != 'null' ]] || continue
+            if [[ "${name}" == "${asset_name}" ]]; then
+              curl -fsSL --retry 4 --retry-all-errors -X DELETE -H "${auth}" "${api}/releases/${release_id}/attach_files/${id}" >/dev/null
+            fi
+          done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${existing}")
+
+          probe="${work}/${asset_name}"
+          head -c 2097152 /dev/zero > "${probe}"
+          expected_size="$(stat -c '%s' "${probe}")"
+          expected_sha="$(sha256sum "${probe}" | awk '{print tolower($1)}')"
+          upload_json="${work}/upload.json"
+          upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 300 --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Expect:' -F "file=@${probe};filename=${asset_name}" "${api}/releases/${release_id}/attach_files")"
+          if [[ ! "${upload_status}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::error::Gitee probe upload failed (HTTP ${upload_status})"
+            jq -c '{message:.message,error:.error,errors:.errors}' "${upload_json}" 2>/dev/null || true
+            exit 1
+          fi
+
+          mirror_url="https://gitee.com/z8hk/codex-mirror/releases/download/${tag}/${asset_name}"
+          downloaded="${work}/downloaded.bin"
+          download_status="$(curl -sS -L -o "${downloaded}" -w '%{http_code}' --connect-timeout 30 --max-time 300 --retry 4 --retry-all-errors "${mirror_url}")"
+          [[ "${download_status}" =~ ^2[0-9][0-9]$ ]]
+          [[ "$(stat -c '%s' "${downloaded}")" == "${expected_size}" ]]
+          [[ "$(sha256sum "${downloaded}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
+
+          echo "Verified Gitee attachment transport: ${expected_size} bytes, SHA-256 ${expected_sha}"
