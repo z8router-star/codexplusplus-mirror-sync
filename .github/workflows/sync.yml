@@ -25,12 +25,12 @@ jobs:
             label: Codex Desktop Windows x64
             gitee_repo: codex-mirror
             asset_mode: codex_desktop_x64
-            runner: ubuntu-latest
+            runner: windows-latest
           - id: codex-desktop-arm64
             label: Codex Desktop Windows arm64
             gitee_repo: codex-mirror-arm64
             asset_mode: codex_desktop_arm64
-            runner: ubuntu-latest
+            runner: windows-latest
           - id: codex-desktop-macos
             label: Codex Desktop macOS
             gitee_repo: codex-mirror-macos
@@ -244,17 +244,32 @@ jobs:
             expected_sha="$(jq -r '.expected_sha' <<<"${asset}")"
             file="${work}/${name}"
             downloaded=false
+            actual_size=0
+            actual_sha=''
             while IFS= read -r candidate_url; do
               [[ -n "${candidate_url}" ]] || continue
               if download_upstream_asset "${candidate_url}" "${file}"; then
-                downloaded=true
-                source_url="${candidate_url}"
-                break
+                candidate_size="$(stat -c '%s' "${file}")"
+                candidate_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
+                valid_candidate=true
+                [[ "${candidate_size}" =~ ^[1-9][0-9]*$ ]] || valid_candidate=false
+                [[ "${expected_size}" == 0 || "${candidate_size}" == "${expected_size}" ]] || valid_candidate=false
+                [[ -z "${expected_sha}" || "${candidate_sha}" == "${expected_sha,,}" ]] || valid_candidate=false
+                if [[ "${ASSET_MODE}" == codex_desktop_x64 || "${ASSET_MODE}" == codex_desktop_arm64 ]]; then
+                  # A small Store response is only the installer stub, not
+                  # the complete signed MSIX package.
+                  (( candidate_size >= 104857600 )) || valid_candidate=false
+                fi
+                if [[ "${valid_candidate}" == true ]]; then
+                  downloaded=true
+                  source_url="${candidate_url}"
+                  actual_size="${candidate_size}"
+                  actual_sha="${candidate_sha}"
+                  break
+                fi
               fi
             done < <(jq -r '.[]' <<<"${source_urls}")
             [[ "${downloaded}" == true ]] || { echo "::error::Unable to download upstream asset: ${name}"; exit 1; }
-            actual_size="$(stat -c '%s' "${file}")"
-            actual_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
             [[ "${actual_size}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Empty upstream asset: ${name}"; exit 1; }
             [[ "${expected_size}" == 0 || "${actual_size}" == "${expected_size}" ]] || { echo "::error::Upstream size mismatch: ${name}"; exit 1; }
             [[ -z "${expected_sha}" || "${actual_sha}" == "${expected_sha,,}" ]] || { echo "::error::Upstream checksum mismatch: ${name}"; exit 1; }
