@@ -13,9 +13,86 @@ permissions:
   contents: read
 
 jobs:
+  download-windows:
+    name: Download Codex Desktop Windows ${{ matrix.architecture }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, arm64]
+
+    steps:
+      - name: Check out resolver
+        uses: actions/checkout@v4
+
+      - name: Resolve and download complete MSIX
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = '${{ matrix.architecture }}'
+          $artifactRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          $resolvedText = & pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture $architecture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store resolver failed for $architecture"
+          }
+          $resolved = ($resolvedText -join "`n") | ConvertFrom-Json
+          $candidates = @($resolved.urls)
+          if ($candidates.Count -eq 0 -and $resolved.url) {
+            $candidates = @($resolved.url)
+          }
+          $outputName = "Codex-windows-$architecture.msix"
+          $outputPath = Join-Path $artifactRoot $outputName
+          $downloaded = $false
+          foreach ($candidate in $candidates) {
+            if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+            Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+            $curlArgs = @(
+              '-fsSL', '--retry', '4', '--retry-all-errors',
+              '-A', 'Mozilla/5.0 (Z8-Launch mirror sync)',
+              '-e', 'https://openai.com/codex/for-work/',
+              '-o', $outputPath, [string]$candidate
+            )
+            if ([string]$candidate -like '*dl.delivery.mp.microsoft.com*') {
+              $curlArgs = @('--insecure') + $curlArgs
+            }
+            & curl.exe @curlArgs
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) { continue }
+            $size = (Get-Item -LiteralPath $outputPath).Length
+            if ($size -lt 104857600) { continue }
+            $expectedSize = [int64]($resolved.size)
+            if ($expectedSize -gt 0 -and $size -ne $expectedSize) { continue }
+            $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expectedHash = [string]($resolved.sha256)
+            if (-not [string]::IsNullOrWhiteSpace($expectedHash) -and $hash -ne $expectedHash.ToLowerInvariant()) { continue }
+            $downloaded = $true
+            break
+          }
+          if (-not $downloaded) {
+            throw "Unable to download a complete Codex Desktop $architecture MSIX"
+          }
+          $metadata = [ordered]@{
+            architecture = $architecture
+            version = [string]$resolved.version
+            fileName = $outputName
+            size = $size
+            sha256 = $hash
+          }
+          $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $artifactRoot 'metadata.json') -Encoding utf8
+
+      - name: Store complete MSIX for the upload job
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-msix-${{ matrix.architecture }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
   sync:
     name: Mirror ${{ matrix.project.label }}
-    runs-on: ${{ matrix.project.runner }}
+    needs: download-windows
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -25,23 +102,21 @@ jobs:
             label: Codex Desktop Windows x64
             gitee_repo: codex-mirror
             asset_mode: codex_desktop_x64
-            runner: windows-latest
+            architecture: x64
           - id: codex-desktop-arm64
             label: Codex Desktop Windows arm64
             gitee_repo: codex-mirror-arm64
             asset_mode: codex_desktop_arm64
-            runner: windows-latest
+            architecture: arm64
           - id: codex-desktop-macos
             label: Codex Desktop macOS
             gitee_repo: codex-mirror-macos
             asset_mode: codex_desktop_macos
-            runner: macos-latest
           - id: codexplusplus
             label: CodexPlusPlus
             upstream: BigPizzaV3/CodexPlusPlus
             gitee_repo: codexplusplus-mirror
             asset_mode: codexplusplus
-            runner: ubuntu-latest
     env:
       GITEE_OWNER: z8hk
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -52,6 +127,13 @@ jobs:
     steps:
       - name: Check out resolver
         uses: actions/checkout@v4
+
+      - name: Download Windows desktop artifact
+        if: matrix.project.asset_mode == 'codex_desktop_x64' || matrix.project.asset_mode == 'codex_desktop_arm64'
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-msix-${{ matrix.project.architecture }}
+          path: windows-assets
 
       - name: Verify and publish latest official bytes
         shell: bash
@@ -87,14 +169,16 @@ jobs:
             case "${ASSET_MODE}" in
               codex_desktop_x64|codex_desktop_arm64)
                 architecture="${ASSET_MODE##*_}"
-                if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}")"; then
-                  msix_name="Codex-windows-${architecture}.msix"
-          selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson sources "$(jq -c '.urls // [.url]' <<<"${resolved}")" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,source_urls:$sources,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
-                  desktop_version="$(jq -r '.version // empty' <<<"${resolved}")"
-                else
-                  echo "::error::Microsoft Store did not expose a stable ${architecture} Codex package"
-                  exit 1
-                fi
+                msix_name="Codex-windows-${architecture}.msix"
+                artifact_file="${GITHUB_WORKSPACE}/windows-assets/${msix_name}"
+                metadata_file="${GITHUB_WORKSPACE}/windows-assets/metadata.json"
+                [[ -f "${artifact_file}" && -f "${metadata_file}" ]] || { echo "::error::Windows desktop artifact is missing for ${architecture}"; exit 1; }
+                desktop_version="$(jq -r '.version // empty' "${metadata_file}")"
+                artifact_size="$(jq -r '.size // 0' "${metadata_file}")"
+                artifact_sha="$(jq -r '.sha256 // empty' "${metadata_file}")"
+                [[ "${artifact_size}" =~ ^[1-9][0-9]*$ && -n "${artifact_sha}" ]] || { echo "::error::Windows desktop artifact metadata is invalid"; exit 1; }
+                artifact_url="artifact://${artifact_file}"
+                selected_assets="$(jq -c --arg name "${msix_name}" --arg source "${artifact_url}" --arg upstream "${store_url}" --argjson size "${artifact_size}" --arg sha "${artifact_sha}" '. + [{name:$name,source_url:$source,source_urls:[$source],upstream_url:$upstream,expected_size:$size,expected_sha:$sha}]' <<<"${selected_assets}")"
                 ;;
               codex_desktop_macos)
                 selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,source_urls:[$arm],upstream_url:$arm,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
@@ -253,7 +337,14 @@ jobs:
             while IFS= read -r candidate_url; do
               candidate_url="$(printf '%s' "${candidate_url}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
               [[ -n "${candidate_url}" ]] || continue
-              if download_upstream_asset "${candidate_url}" "${file}"; then
+              if [[ "${candidate_url}" == artifact://* ]]; then
+                cp -- "${candidate_url#artifact://}" "${file}"
+              elif download_upstream_asset "${candidate_url}" "${file}"; then
+                :
+              else
+                continue
+              fi
+              if [[ -s "${file}" ]]; then
                 candidate_size="$(stat -c '%s' "${file}")"
                 candidate_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
                 valid_candidate=true
