@@ -122,7 +122,10 @@ jobs:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       GITEE_REPO: ${{ matrix.project.gitee_repo }}
       ASSET_MODE: ${{ matrix.project.asset_mode }}
-      CHUNK_BYTES: "47185920"
+      # Keep every attachment comfortably below Gitee's practical upload
+      # threshold. Smaller chunks also avoid long-lived multipart requests
+      # that can stall on hosted-runner egress.
+      CHUNK_BYTES: "10485760"
 
     steps:
       - name: Check out resolver
@@ -305,7 +308,7 @@ jobs:
             if [[ "${RUNNER_OS}" == "Windows" ]]; then
               upload_status="$(UPLOAD_FILE="${file}" UPLOAD_NAME="${name}" UPLOAD_URL="${api}/releases/${release_id}/attach_files" UPLOAD_JSON="${upload_json}" pwsh -NoProfile -Command '$ProgressPreference = "SilentlyContinue"; $client = $null; $stream = $null; try { $client = [Net.Http.HttpClient]::new(); $client.Timeout = [TimeSpan]::FromMinutes(10); $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $env:UPLOAD_URL); $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new("token", $env:GITEE_TOKEN); $multipart = [Net.Http.MultipartFormDataContent]::new(); $stream = [IO.File]::OpenRead($env:UPLOAD_FILE); $fileContent = [Net.Http.StreamContent]::new($stream); $multipart.Add($fileContent, "file", $env:UPLOAD_NAME); $request.Content = $multipart; $response = $client.SendAsync($request).GetAwaiter().GetResult(); $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult(); [IO.File]::WriteAllText($env:UPLOAD_JSON, $body); [string][int]$response.StatusCode } catch { $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode.value__ } else { 0 }; $body = $_.Exception.Message; [IO.File]::WriteAllText($env:UPLOAD_JSON, $body); [string]$status } finally { if ($stream) { $stream.Dispose() }; if ($client) { $client.Dispose() } }' || true)"
             else
-              upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")"
+              upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 180 --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")" || true
             fi
             [[ "${upload_status}" =~ ^2[0-9][0-9]$ ]] || {
               echo "::error::Gitee attachment upload failed for ${name} (HTTP ${upload_status})" >&2
@@ -315,7 +318,7 @@ jobs:
             local mirror_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/${name}"
             local mirror_file="${work}/verify-${name//\//_}" mirror_size mirror_sha
             local mirror_status
-            mirror_status="$(curl -sS -L -o "${mirror_file}" -w '%{http_code}' --retry 4 --retry-all-errors "${mirror_url}")"
+            mirror_status="$(curl -sS -L -o "${mirror_file}" -w '%{http_code}' --connect-timeout 30 --max-time 180 --retry 4 --retry-all-errors "${mirror_url}")" || true
             [[ "${mirror_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Gitee attachment verification download failed for ${name} (HTTP ${mirror_status})" >&2; return 1; }
             mirror_size="$(stat -c '%s' "${mirror_file}")"
             mirror_sha="$(sha256sum "${mirror_file}" | awk '{print tolower($1)}')"
