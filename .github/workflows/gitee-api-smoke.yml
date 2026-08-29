@@ -52,6 +52,7 @@ jobs:
             jq -c '{message:.message,error:.error,errors:.errors}' "${release_json}" 2>/dev/null || true
             exit 1
           fi
+          jq -c '{response_type:type,keys:(if type == "object" then keys else [] end),id:(.id // null),id_type:((.id // null) | type),release_id:(.release.id // null),data_id:(.data.id // null)}' "${release_json}" 2>/dev/null || true
           release_id="$(jq -r '.id // .release.id // .data.id // empty' "${release_json}")"
           if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
             echo '::error::Gitee response did not contain a numeric release id'
