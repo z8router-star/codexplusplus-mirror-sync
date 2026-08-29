@@ -1,26 +1,22 @@
-name: Sync official Codex Desktop and Codex++ to Gitee
+name: Stage official Codex Desktop for domestic mirrors
 
 on:
   schedule:
-    - cron: "17,47 * * * *"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: z8-codex-mirror-sync
+  group: z8-codex-desktop-staging
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   download-windows:
-    name: Download Codex Desktop Windows ${{ matrix.architecture }}
+    name: Download Codex Desktop Windows x64
     runs-on: windows-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        architecture: [x64, arm64]
 
     steps:
       - name: Check out resolver
@@ -30,19 +26,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $architecture = '${{ matrix.architecture }}'
+          $architecture = 'x64'
           $artifactRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+
           $resolvedText = & pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture $architecture
           if ($LASTEXITCODE -ne 0) {
-            throw "Microsoft Store resolver failed for $architecture"
+            throw 'Microsoft Store resolver failed for x64'
           }
           $resolved = ($resolvedText -join "`n") | ConvertFrom-Json
           $candidates = @($resolved.urls)
           if ($candidates.Count -eq 0 -and $resolved.url) {
             $candidates = @($resolved.url)
           }
-          $outputName = "Codex-windows-$architecture.msix"
+
+          $outputName = 'Codex-windows-x64.msix'
           $outputPath = Join-Path $artifactRoot $outputName
           $downloaded = $false
           foreach ($candidate in $candidates) {
@@ -50,7 +48,7 @@ jobs:
             Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
             $curlArgs = @(
               '-fsSL', '--retry', '4', '--retry-all-errors',
-              '-A', 'Mozilla/5.0 (Z8-Launch mirror sync)',
+              '-A', 'Mozilla/5.0 (Z8-Launch mirror staging)',
               '-e', 'https://openai.com/codex/for-work/',
               '-o', $outputPath, [string]$candidate
             )
@@ -59,6 +57,7 @@ jobs:
             }
             & curl.exe @curlArgs
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) { continue }
+
             $size = (Get-Item -LiteralPath $outputPath).Length
             if ($size -lt 104857600) { continue }
             $expectedSize = [int64]($resolved.size)
@@ -70,385 +69,75 @@ jobs:
             break
           }
           if (-not $downloaded) {
-            throw "Unable to download a complete Codex Desktop $architecture MSIX"
+            throw 'Unable to download a complete Codex Desktop x64 MSIX'
           }
+
           $metadata = [ordered]@{
+            schemaVersion = 1
             architecture = $architecture
             version = [string]$resolved.version
             fileName = $outputName
-            size = $size
+            sizeBytes = $size
             sha256 = $hash
+            upstreamUrl = 'https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
+            generatedAt = [DateTime]::UtcNow.ToString('o')
           }
-          $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $artifactRoot 'metadata.json') -Encoding utf8
+          $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $artifactRoot 'Codex-windows-x64.json') -Encoding utf8
 
-      - name: Store complete MSIX for the upload job
+      - name: Store verified MSIX for staging release
         uses: actions/upload-artifact@v4
         with:
-          name: codex-msix-${{ matrix.architecture }}
+          name: codex-msix-x64
           path: artifacts/
           if-no-files-found: error
           retention-days: 1
 
-  sync:
-    name: Mirror ${{ matrix.project.label }}
+  publish-staging-release:
+    name: Publish versioned staging release
     needs: download-windows
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    continue-on-error: ${{ matrix.project.asset_mode == 'codex_desktop_arm64' || matrix.project.asset_mode == 'codex_desktop_macos' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        project:
-          - id: codex-desktop
-            label: Codex Desktop Windows x64
-            gitee_repo: codex-mirror
-            asset_mode: codex_desktop_x64
-            architecture: x64
-          - id: codex-desktop-arm64
-            label: Codex Desktop Windows arm64
-            gitee_repo: codex-mirror-arm64
-            asset_mode: codex_desktop_arm64
-            architecture: arm64
-          - id: codex-desktop-macos
-            label: Codex Desktop macOS
-            gitee_repo: codex-mirror-macos
-            asset_mode: codex_desktop_macos
-          - id: codexplusplus
-            label: CodexPlusPlus
-            upstream: BigPizzaV3/CodexPlusPlus
-            gitee_repo: codexplusplus-mirror
-            asset_mode: codexplusplus
-    env:
-      GITEE_OWNER: z8hk
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_REPO: ${{ matrix.project.gitee_repo }}
-      ASSET_MODE: ${{ matrix.project.asset_mode }}
-      # Keep every attachment comfortably below Gitee's practical upload
-      # threshold. Smaller chunks also avoid long-lived multipart requests
-      # that can stall on hosted-runner egress.
-      CHUNK_BYTES: "10485760"
+    timeout-minutes: 15
 
     steps:
-      - name: Check out resolver
-        uses: actions/checkout@v4
-
-      - name: Download Windows desktop artifact
-        if: matrix.project.asset_mode == 'codex_desktop_x64' || matrix.project.asset_mode == 'codex_desktop_arm64'
+      - name: Download verified Windows package
         uses: actions/download-artifact@v4
         with:
-          name: codex-msix-${{ matrix.project.architecture }}
-          path: windows-assets
+          name: codex-msix-x64
+          path: staging
 
-      - name: Verify and publish latest official bytes
+      - name: Revalidate and publish immutable release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          : "${GITEE_TOKEN:?Set the GITEE_TOKEN repository secret first}"
 
-          api="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
-          auth="Authorization: token ${GITEE_TOKEN}"
-          work="$(mktemp -d)"
-          trap 'rm -rf "${work}"' EXIT
-          selected_assets='[]'
-          manifest_assets='[]'
-          manifest_schema=2
+          metadata='staging/Codex-windows-x64.json'
+          package='staging/Codex-windows-x64.msix'
+          test -f "${metadata}"
+          test -f "${package}"
 
-          if [[ "${ASSET_MODE}" == "codexplusplus" ]]; then
-            upstream_repo='BigPizzaV3/CodexPlusPlus'
-            upstream="$(curl -fsSL --retry 4 --retry-all-errors \
-              -H 'Accept: application/vnd.github+json' \
-              -H 'X-GitHub-Api-Version: 2022-11-28' \
-              "https://api.github.com/repos/${upstream_repo}/releases/latest")"
-            jq -e '.draft == false and .prerelease == false' <<<"${upstream}" >/dev/null
-            tag="$(jq -r '.tag_name // empty' <<<"${upstream}")"
-            version="${tag#v}"
-            release_url="$(jq -r '.html_url // empty' <<<"${upstream}")"
-            [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Invalid upstream tag: ${tag}"; exit 1; }
-            selected_assets="$(jq -c --arg version "${version}" '[.assets[] | select(.name == ("CodexPlusPlus-" + $version + "-windows-x64-setup.exe") or .name == ("CodexPlusPlus-" + $version + "-macos-x64.dmg") or .name == ("CodexPlusPlus-" + $version + "-macos-arm64.dmg"))] | map({name:.name,source_url:.browser_download_url,source_urls:[.browser_download_url],upstream_url:.browser_download_url,expected_size:.size,expected_sha:(.digest // "" | sub("^sha256:"; ""))})' <<<"${upstream}")"
-            [[ "$(jq 'length' <<<"${selected_assets}")" == 3 ]] || { echo "::error::CodexPlusPlus release is missing a required target"; exit 1; }
+          version="$(jq -r '.version // empty' "${metadata}")"
+          expected_size="$(jq -r '.sizeBytes // 0' "${metadata}")"
+          expected_sha="$(jq -r '.sha256 // empty' "${metadata}")"
+          [[ "${version}" =~ ^[0-9]+(\.[0-9]+)+$ ]]
+          [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
+
+          actual_size="$(stat -c '%s' "${package}")"
+          actual_sha="$(sha256sum "${package}" | awk '{print tolower($1)}')"
+          [[ "${actual_size}" == "${expected_size}" ]]
+          [[ "${actual_sha}" == "${expected_sha}" ]]
+
+          tag="codex-desktop-${version}"
+          title="Codex Desktop Windows x64 ${version}"
+          notes='Official Microsoft Store MSIX staged for Gitee Go domestic mirroring. Z8 Launch verifies the declared size, SHA-256, and Windows signature before installation.'
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}" --latest=false
           else
-            upstream_repo='openai/codex'
-            release_url='https://openai.com/codex/for-work/'
-            store_url='https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
-            desktop_version=''
-            case "${ASSET_MODE}" in
-              codex_desktop_x64|codex_desktop_arm64)
-                manifest_schema=3
-                architecture="${ASSET_MODE##*_}"
-                msix_name="Codex-windows-${architecture}.msix"
-                artifact_file="${GITHUB_WORKSPACE}/windows-assets/${msix_name}"
-                metadata_file="${GITHUB_WORKSPACE}/windows-assets/metadata.json"
-                [[ -f "${artifact_file}" && -f "${metadata_file}" ]] || { echo "::error::Windows desktop artifact is missing for ${architecture}"; exit 1; }
-                desktop_version="$(jq -r '.version // empty' "${metadata_file}")"
-                artifact_size="$(jq -r '.size // 0' "${metadata_file}")"
-                artifact_sha="$(jq -r '.sha256 // empty' "${metadata_file}")"
-                [[ "${artifact_size}" =~ ^[1-9][0-9]*$ && -n "${artifact_sha}" ]] || { echo "::error::Windows desktop artifact metadata is invalid"; exit 1; }
-                artifact_url="artifact://${artifact_file}"
-                selected_assets="$(jq -c --arg name "${msix_name}" --arg source "${artifact_url}" --arg upstream "${store_url}" --argjson size "${artifact_size}" --arg sha "${artifact_sha}" '. + [{name:$name,source_url:$source,source_urls:[$source],upstream_url:$upstream,expected_size:$size,expected_sha:$sha}]' <<<"${selected_assets}")"
-                ;;
-              codex_desktop_macos)
-                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,source_urls:[$arm],upstream_url:$arm,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
-                ;;
-              *)
-                echo "::error::Unsupported desktop asset mode: ${ASSET_MODE}"
-                exit 1
-                ;;
-            esac
-            required_assets=1
-            [[ "${ASSET_MODE}" == 'codex_desktop_macos' ]] && required_assets=1
-            [[ "$(jq 'length' <<<"${selected_assets}")" -ge "${required_assets}" ]] || { echo "::error::No Codex Desktop package was resolved"; exit 1; }
-            if [[ -n "${desktop_version}" ]]; then
-              version="${desktop_version}"
-            else
-              version="desktop-$(date -u +%Y%m%d)"
-            fi
-            tag="${version}"
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "${title}" --notes "${notes}" --latest=false
           fi
+          gh release upload "${tag}" "${package}" "${metadata}" --repo "${GITHUB_REPOSITORY}" --clobber
 
-          [[ "${version}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid mirror version"; exit 1; }
-
-          ensure_master_branch() {
-            local branch_status bootstrap_payload bootstrap_content
-            branch_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "${auth}" "${api}/branches/master")"
-            [[ "${branch_status}" == 200 ]] && return 0
-            [[ "${branch_status}" == 404 ]] || { echo "::error::Unable to inspect Gitee master branch (HTTP ${branch_status})"; return 1; }
-            bootstrap_content="WjggTGF1bmNoIG1pcnJvciBib290c3RyYXAuCg=="
-            bootstrap_payload="$(jq -n --arg message 'initialize Z8 Launch mirror' --arg content "${bootstrap_content}" --arg branch master '{message:$message,content:$content,branch:$branch}')"
-            curl -fsSL --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${bootstrap_payload}" "${api}/contents/.z8-launch-mirror" >/dev/null
-          }
-
-          ensure_master_branch
-
-          release_json="${work}/release.json"
-          status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
-          if [[ "${status}" == 200 ]]; then
-            release_id="$(jq -r '.id // empty' "${release_json}")"
-            [[ "${release_id}" =~ ^[0-9]+$ ]] || status=404
-          fi
-          if [[ "${status}" == 404 ]]; then
-            tag_json="${work}/tag.json"
-            tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
-            if [[ "${tag_status}" == 404 ]]; then
-              tag_payload="$(jq -n --arg tag "${tag}" --arg refs master '{tag_name:$tag,refs:$refs}')"
-              tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${tag_payload}" "${api}/tags")"
-            fi
-            [[ "${tag_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Unable to ensure Gitee tag ${tag} (HTTP ${tag_status})"; jq -c 'del(.message,.detail)' "${tag_json}" 2>/dev/null || true; exit 1; }
-            body="Mirrored official bytes from ${release_url}. Every asset is SHA-256 verified before upload; large files are split below Gitee's per-file limit and described in latest.json."
-            payload="$(jq -n --arg tag "${tag}" --arg name "${{ matrix.project.label }} ${version}" --arg body "${body}" '{tag_name:$tag,name:$name,body:$body,target_commitish:"master",prerelease:false}')"
-            create_json="${work}/create-release.json"
-            create_status="$(curl -sS -o "${create_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/releases")"
-            release_id="$(jq -r '.id // .release.id // .data.id // empty' "${create_json}")"
-            if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
-              echo "::error::Gitee release creation failed (HTTP ${create_status})"
-              jq -c '{keys:(keys // []),id:.id,message:.message,detail:.detail,error:.error,errors:.errors}' "${create_json}" 2>/dev/null || head -c 1000 "${create_json}" || true
-            fi
-          elif [[ "${release_id}" =~ ^[0-9]+$ ]]; then
-            :
-          else
-            cat "${release_json}"
-            exit 1
-          fi
-          [[ "${release_id}" =~ ^[0-9]+$ ]] || { echo "::error::Invalid Gitee release id"; exit 1; }
-
-          delete_all_assets() {
-            local list id existing
-            list="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
-            while IFS=$'\t' read -r id existing; do
-              [[ -n "${id}" && "${id}" != null ]] || continue
-              curl -fsSL --retry 4 --retry-all-errors -X DELETE -H "${auth}" "${api}/releases/${release_id}/attach_files/${id}" >/dev/null
-            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${list}")
-          }
-
-          # A failed run can leave a partial set of chunks. Start each release
-          # refresh from an empty attachment list so the manifest is atomic.
-          delete_all_assets
-
-          delete_named_asset() {
-            local name="$1" list id existing
-            list="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
-            while IFS=$'\t' read -r id existing; do
-              [[ -n "${id}" && "${id}" != null ]] || continue
-              [[ "${existing}" == "${name}" ]] && curl -fsSL --retry 4 --retry-all-errors -X DELETE -H "${auth}" "${api}/releases/${release_id}/attach_files/${id}" >/dev/null
-            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"${list}")
-          }
-
-          download_upstream_asset() {
-            local url="$1" file="$2"
-            local -a options=(-fsSL --retry 4 --retry-all-errors -A 'Mozilla/5.0 (Z8-Launch mirror sync)' -e 'https://openai.com/codex/for-work/')
-            # Microsoft CDN occasionally presents an incomplete public chain
-            # to hosted Linux runners. The MSIX is still checked by its exact
-            # bytes and Windows Authenticode policy before Z8 Launch installs it.
-            if [[ "${url}" == *dl.delivery.mp.microsoft.com/* ]]; then
-              options+=(--insecure)
-              if curl "${options[@]}" -o "${file}" "${url}"; then
-                return 0
-              fi
-              # Store currently returns HTTP URLs. Retry the alternate
-              # protocol because some runner egress paths reject one side.
-              local alternate="${url}"
-              if [[ "${url}" == https://* ]]; then
-                alternate="http://${url#https://}"
-              elif [[ "${url}" == http://* ]]; then
-                alternate="https://${url#http://}"
-              fi
-              curl "${options[@]}" -o "${file}" "${alternate}"
-              return $?
-            fi
-            if curl "${options[@]}" -o "${file}" "${url}"; then
-              return 0
-            fi
-            # Keep a small query-string fallback for static assets whose edge
-            # cache occasionally returns a transient 404 for the bare path.
-            local separator='?'
-            [[ "${url}" == *\?* ]] && separator='&'
-            curl "${options[@]}" -o "${file}" "${url}${separator}download=1"
-          }
-
-          upload_and_verify() {
-            local file="$1" name="$2" expected_size="$3" expected_sha="$4"
-            delete_named_asset "${name}"
-            local upload_json="${work}/upload-${name//\//_}.json" upload_status
-            if [[ "${RUNNER_OS}" == "Windows" ]]; then
-              upload_status="$(UPLOAD_FILE="${file}" UPLOAD_NAME="${name}" UPLOAD_URL="${api}/releases/${release_id}/attach_files" UPLOAD_JSON="${upload_json}" pwsh -NoProfile -Command '$ProgressPreference = "SilentlyContinue"; $client = $null; $stream = $null; try { $client = [Net.Http.HttpClient]::new(); $client.Timeout = [TimeSpan]::FromMinutes(10); $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $env:UPLOAD_URL); $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new("token", $env:GITEE_TOKEN); $multipart = [Net.Http.MultipartFormDataContent]::new(); $stream = [IO.File]::OpenRead($env:UPLOAD_FILE); $fileContent = [Net.Http.StreamContent]::new($stream); $multipart.Add($fileContent, "file", $env:UPLOAD_NAME); $request.Content = $multipart; $response = $client.SendAsync($request).GetAwaiter().GetResult(); $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult(); [IO.File]::WriteAllText($env:UPLOAD_JSON, $body); [string][int]$response.StatusCode } catch { $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode.value__ } else { 0 }; $body = $_.Exception.Message; [IO.File]::WriteAllText($env:UPLOAD_JSON, $body); [string]$status } finally { if ($stream) { $stream.Dispose() }; if ($client) { $client.Dispose() } }' || true)"
-            else
-              upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 180 --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")" || true
-            fi
-            [[ "${upload_status}" =~ ^2[0-9][0-9]$ ]] || {
-              echo "::error::Gitee attachment upload failed for ${name} (HTTP ${upload_status})" >&2
-              jq -c '{message:.message,error:.error,errors:.errors}' "${upload_json}" >&2 2>/dev/null || head -c 1000 "${upload_json}" >&2 || true
-              return 1
-            }
-            local mirror_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/download/${tag}/${name}"
-            local mirror_file="${work}/verify-${name//\//_}" mirror_size mirror_sha
-            local mirror_status
-            mirror_status="$(curl -sS -L -o "${mirror_file}" -w '%{http_code}' --connect-timeout 30 --max-time 180 --retry 4 --retry-all-errors "${mirror_url}")" || true
-            [[ "${mirror_status}" =~ ^2[0-9][0-9]$ ]] || { echo "::error::Gitee attachment verification download failed for ${name} (HTTP ${mirror_status})" >&2; return 1; }
-            mirror_size="$(stat -c '%s' "${mirror_file}")"
-            mirror_sha="$(sha256sum "${mirror_file}" | awk '{print tolower($1)}')"
-            [[ "${mirror_size}" == "${expected_size}" && "${mirror_sha}" == "${expected_sha,,}" ]] || { echo "::error::Gitee checksum mismatch: ${name}" >&2; return 1; }
-            printf '%s\n' "${mirror_url}"
-          }
-
-          while IFS= read -r asset; do
-            name="$(jq -r '.name' <<<"${asset}")"
-            source_url="$(jq -r '.source_url' <<<"${asset}")"
-            source_urls="$(jq -c '.source_urls // [.source_url]' <<<"${asset}")"
-            upstream_url="$(jq -r '.upstream_url' <<<"${asset}")"
-            expected_size="$(jq -r '.expected_size' <<<"${asset}")"
-            expected_sha="$(jq -r '.expected_sha' <<<"${asset}")"
-            file="${work}/${name}"
-            downloaded=false
-            actual_size=0
-            actual_sha=''
-            while IFS= read -r candidate_url; do
-              candidate_url="$(printf '%s' "${candidate_url}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-              [[ -n "${candidate_url}" ]] || continue
-              if [[ "${candidate_url}" == artifact://* ]]; then
-                cp -- "${candidate_url#artifact://}" "${file}"
-              elif download_upstream_asset "${candidate_url}" "${file}"; then
-                :
-              else
-                continue
-              fi
-              if [[ -s "${file}" ]]; then
-                candidate_size="$(stat -c '%s' "${file}")"
-                candidate_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
-                valid_candidate=true
-                [[ "${candidate_size}" =~ ^[1-9][0-9]*$ ]] || valid_candidate=false
-                [[ "${expected_size}" == 0 || "${candidate_size}" == "${expected_size}" ]] || valid_candidate=false
-                [[ -z "${expected_sha}" || "${candidate_sha}" == "${expected_sha,,}" ]] || valid_candidate=false
-                if [[ "${ASSET_MODE}" == codex_desktop_x64 || "${ASSET_MODE}" == codex_desktop_arm64 ]]; then
-                  # A small Store response is only the installer stub, not
-                  # the complete signed MSIX package.
-                  (( candidate_size >= 104857600 )) || valid_candidate=false
-                fi
-                if [[ "${valid_candidate}" == true ]]; then
-                  downloaded=true
-                  source_url="${candidate_url}"
-                  actual_size="${candidate_size}"
-                  actual_sha="${candidate_sha}"
-                  break
-                fi
-              fi
-            done < <(jq -r '.[]' <<<"${source_urls}")
-            [[ "${downloaded}" == true ]] || { echo "::error::Unable to download upstream asset: ${name}"; exit 1; }
-            [[ "${actual_size}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Empty upstream asset: ${name}"; exit 1; }
-            [[ "${expected_size}" == 0 || "${actual_size}" == "${expected_size}" ]] || { echo "::error::Upstream size mismatch: ${name}"; exit 1; }
-            [[ -z "${expected_sha}" || "${actual_sha}" == "${expected_sha,,}" ]] || { echo "::error::Upstream checksum mismatch: ${name}"; exit 1; }
-
-            parts='[]'
-            chunk_bytes="${CHUNK_BYTES}"
-            if [[ "${ASSET_MODE}" == codex_desktop_x64 || "${ASSET_MODE}" == codex_desktop_arm64 ]]; then
-              # Eight raw MiB become about 10.7 MiB of Base64 text and keep a
-              # complete desktop package below the 100-part Gitee API page.
-              chunk_bytes=8388608
-            elif [[ "${ASSET_MODE}" == "codexplusplus" && "${name}" == *windows-x64-setup.exe ]]; then
-              # Gitee's malware scanner rejects the complete installer even
-              # when the attachment has a non-executable suffix. Uploading
-              # chunks keeps each attachment non-runnable; Z8 Launch restores
-              # the logical .exe from the verified parts.
-              chunk_bytes=10485760
-            fi
-            if (( actual_size <= chunk_bytes )); then
-              mirror_url="$(upload_and_verify "${file}" "${name}" "${actual_size}" "${actual_sha}")"
-              parts="$(jq -c --arg filename "${name}" --arg url "${mirror_url}" --argjson size "${actual_size}" --arg sha "${actual_sha}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha}]' <<<"${parts}")"
-            else
-              chunk_dir="${work}/chunks-${name}"
-              mkdir -p "${chunk_dir}"
-              split -b "${chunk_bytes}" -d -a 4 "${file}" "${chunk_dir}/part-"
-              index=1
-              for chunk in "${chunk_dir}"/part-*; do
-                chunk_size="$(stat -c '%s' "${chunk}")"
-                chunk_sha="$(sha256sum "${chunk}" | awk '{print tolower($1)}')"
-                if [[ "${ASSET_MODE}" == codex_desktop_x64 || "${ASSET_MODE}" == codex_desktop_arm64 ]]; then
-                  transport_chunk="${chunk}.b64"
-                  base64 -w0 "${chunk}" > "${transport_chunk}"
-                  chunk_name="${name%.*}.part-$(printf '%04d' "${index}").b64"
-                  transport_size="$(stat -c '%s' "${transport_chunk}")"
-                  transport_sha="$(sha256sum "${transport_chunk}" | awk '{print tolower($1)}')"
-                  mirror_url="$(upload_and_verify "${transport_chunk}" "${chunk_name}" "${transport_size}" "${transport_sha}")"
-                  parts="$(jq -c --arg filename "${chunk_name}" --arg url "${mirror_url}" --argjson size "${transport_size}" --arg sha "${transport_sha}" --argjson decodedSize "${chunk_size}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha,encoding:"base64",decodedSizeBytes:$decodedSize}]' <<<"${parts}")"
-                else
-                  chunk_name="${name}.part-$(printf '%04d' "${index}")"
-                  mirror_url="$(upload_and_verify "${chunk}" "${chunk_name}" "${chunk_size}" "${chunk_sha}")"
-                  parts="$(jq -c --arg filename "${chunk_name}" --arg url "${mirror_url}" --argjson size "${chunk_size}" --arg sha "${chunk_sha}" '. + [{filename:$filename,mirrorUrl:$url,sizeBytes:$size,sha256:$sha}]' <<<"${parts}")"
-                fi
-                index=$((index + 1))
-              done
-            fi
-            manifest_assets="$(jq -c --arg filename "${name}" --arg upstream "${upstream_url}" --argjson size "${actual_size}" --arg sha "${actual_sha}" --argjson parts "${parts}" '. + [{filename:$filename,upstreamUrl:$upstream,sizeBytes:$size,sha256:$sha,parts:$parts}]' <<<"${manifest_assets}")"
-          done < <(jq -c '.[]' <<<"${selected_assets}")
-
-          manifest="${work}/latest.json"
-          jq -n \
-            --argjson schemaVersion "${manifest_schema}" \
-            --arg upstream "${upstream_repo}" \
-            --arg tag "${tag}" \
-            --arg version "${version}" \
-            --arg releaseUrl "${release_url}" \
-            --arg mirrorRepo "${GITEE_OWNER}/${GITEE_REPO}" \
-            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --argjson assets "${manifest_assets}" \
-            '{schemaVersion:$schemaVersion,upstreamRepository:$upstream,tag:$tag,version:$version,upstreamReleaseUrl:$releaseUrl,mirrorRepository:$mirrorRepo,generatedAt:$generatedAt,assets:$assets}' > "${manifest}"
-          manifest_size="$(stat -c '%s' "${manifest}")"
-          manifest_sha="$(sha256sum "${manifest}" | awk '{print tolower($1)}')"
-          # latest.json is the authoritative manifest consumed by Z8 Launch.
-          # Keep it in the repository rather than as a release attachment;
-          # Gitee's attachment CDN can reject small JSON files after a large
-          # upload even though all binary chunks have verified successfully.
-          echo "Manifest SHA-256: ${manifest_sha} (${manifest_size} bytes)"
-
-          content="$(base64 -w0 "${manifest}")"
-          existing="$(curl -sS -H "${auth}" "${api}/contents/latest.json?ref=master")"
-          sha="$(jq -r 'if type == "object" then (.sha // empty) else empty end' <<<"${existing}")"
-          payload="$(jq -n --arg message "sync latest ${version}" --arg content "${content}" --arg branch master --arg sha "${sha}" 'if $sha == "" then {message:$message,content:$content,branch:$branch} else {message:$message,content:$content,branch:$branch,sha:$sha} end')"
-          latest_json_response="${work}/latest-json-response.json"
-          latest_json_method='POST'
-          [[ -n "${sha}" ]] && latest_json_method='PUT'
-          latest_json_status="$(curl -sS -o "${latest_json_response}" -w '%{http_code}' --retry 4 --retry-all-errors -X "${latest_json_method}" -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/contents/latest.json")"
-          [[ "${latest_json_status}" =~ ^2[0-9][0-9]$ ]] || {
-            echo "::error::Gitee latest.json update failed (HTTP ${latest_json_status})" >&2
-            jq -c '{keys:(keys // []),message:.message,detail:.detail,error:.error,errors:.errors}' "${latest_json_response}" >&2 2>/dev/null || head -c 1000 "${latest_json_response}" >&2 || true
-            exit 1
-          }
-          echo "Synced ${upstream_repo} ${tag} to https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/tag/${tag}"
+          echo "Published ${tag}: ${actual_size} bytes, SHA-256 ${actual_sha}"
