@@ -7,6 +7,7 @@ base = "e6d9a1e"
 [scope]
 allow = [
   ".github/workflows/sync.yml",
+  "scripts/publish-gitee-mirror.sh",
   "scripts/resolve-codex-msix.ps1",
   "codex-desktop-gitee-sync-plan.md",
 ]
@@ -33,6 +34,8 @@ cmd = "git diff --check"
   identity, size, and SHA-256, and uploads the original bytes without
   repackaging.
 - Codex++ remains sourced from `BigPizzaV3/CodexPlusPlus` stable Releases and is published to `z8hk/codexplusplus-mirror`.
-- Codex Desktop is published to `z8hk/codex-mirror`; Windows MSIX files larger than the Gitee single-file limit are split into 45 MiB ordered parts and described in `latest.json`.
+- Codex Desktop is published to `z8hk/codex-mirror`; files are split into
+  bounded Base64 parts, uploaded in parallel, downloaded back from Gitee, and
+  described by a schema 3 `latest.json` only after every hash check passes.
 - The workflow requires the owner-provided `GITEE_TOKEN` secret but never prints or stores it in the repository.
 - Quark is out of scope. No upload to cloud drives or private server is performed.

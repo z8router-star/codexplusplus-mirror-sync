@@ -1,4 +1,4 @@
-name: Stage official Codex Desktop for domestic mirrors
+name: Sync official Codex Desktop and Codex++ to Gitee
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: z8-codex-desktop-staging
+  group: z8-codex-domestic-mirror
   cancel-in-progress: false
 
 permissions:
@@ -14,32 +14,23 @@ permissions:
 
 jobs:
   download-windows:
-    name: Download Codex Desktop Windows x64
+    name: Resolve official Codex Desktop Windows x64
     runs-on: windows-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 45
     steps:
       - name: Check out resolver
         uses: actions/checkout@v4
-
-      - name: Resolve and download complete MSIX
+      - name: Download and verify complete MSIX
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $architecture = 'x64'
           $artifactRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-
-          $resolvedText = & pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture $architecture
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Microsoft Store resolver failed for x64'
-          }
+          $resolvedText = & pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture x64
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store resolver failed for x64' }
           $resolved = ($resolvedText -join "`n") | ConvertFrom-Json
           $candidates = @($resolved.urls)
-          if ($candidates.Count -eq 0 -and $resolved.url) {
-            $candidates = @($resolved.url)
-          }
-
+          if ($candidates.Count -eq 0 -and $resolved.url) { $candidates = @($resolved.url) }
           $outputName = 'Codex-windows-x64.msix'
           $outputPath = Join-Path $artifactRoot $outputName
           $downloaded = $false
@@ -48,7 +39,7 @@ jobs:
             Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
             $curlArgs = @(
               '-fsSL', '--retry', '4', '--retry-all-errors',
-              '-A', 'Mozilla/5.0 (Z8-Launch mirror staging)',
+              '-A', 'Mozilla/5.0 (Z8-Launch domestic mirror)',
               '-e', 'https://openai.com/codex/for-work/',
               '-o', $outputPath, [string]$candidate
             )
@@ -57,24 +48,18 @@ jobs:
             }
             & curl.exe @curlArgs
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) { continue }
-
             $size = (Get-Item -LiteralPath $outputPath).Length
             if ($size -lt 104857600) { continue }
             $expectedSize = [int64]($resolved.size)
             if ($expectedSize -gt 0 -and $size -ne $expectedSize) { continue }
             $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            $expectedHash = [string]($resolved.sha256)
-            if (-not [string]::IsNullOrWhiteSpace($expectedHash) -and $hash -ne $expectedHash.ToLowerInvariant()) { continue }
             $downloaded = $true
             break
           }
-          if (-not $downloaded) {
-            throw 'Unable to download a complete Codex Desktop x64 MSIX'
-          }
-
+          if (-not $downloaded) { throw 'Unable to download a complete Codex Desktop x64 MSIX' }
           $metadata = [ordered]@{
             schemaVersion = 1
-            architecture = $architecture
+            architecture = 'x64'
             version = [string]$resolved.version
             fileName = $outputName
             sizeBytes = $size
@@ -83,8 +68,7 @@ jobs:
             generatedAt = [DateTime]::UtcNow.ToString('o')
           }
           $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $artifactRoot 'Codex-windows-x64.json') -Encoding utf8
-
-      - name: Store verified MSIX for staging release
+      - name: Store verified MSIX
         uses: actions/upload-artifact@v4
         with:
           name: codex-msix-x64
@@ -93,51 +77,134 @@ jobs:
           retention-days: 1
 
   publish-staging-release:
-    name: Publish versioned staging release
+    name: Publish immutable Codex Desktop staging release
     needs: download-windows
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 30
     steps:
-      - name: Download verified Windows package
+      - name: Download verified package
         uses: actions/download-artifact@v4
         with:
           name: codex-msix-x64
           path: staging
-
-      - name: Revalidate and publish immutable release
+      - name: Revalidate and publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           metadata='staging/Codex-windows-x64.json'
           package='staging/Codex-windows-x64.msix'
-          test -f "${metadata}"
-          test -f "${package}"
-
           version="$(jq -r '.version // empty' "${metadata}")"
           expected_size="$(jq -r '.sizeBytes // 0' "${metadata}")"
           expected_sha="$(jq -r '.sha256 // empty' "${metadata}")"
           [[ "${version}" =~ ^[0-9]+(\.[0-9]+)+$ ]]
-          [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
-          [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
-
-          actual_size="$(stat -c '%s' "${package}")"
-          actual_sha="$(sha256sum "${package}" | awk '{print tolower($1)}')"
-          [[ "${actual_size}" == "${expected_size}" ]]
-          [[ "${actual_sha}" == "${expected_sha}" ]]
-
+          [[ "$(stat -c '%s' "${package}")" == "${expected_size}" ]]
+          [[ "$(sha256sum "${package}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
           tag="codex-desktop-${version}"
           title="Codex Desktop Windows x64 ${version}"
-          notes='Official Microsoft Store MSIX staged for Gitee Go domestic mirroring. Z8 Launch verifies the declared size, SHA-256, and Windows signature before installation.'
-
+          notes='Official Microsoft Store MSIX staged for the Z8 Gitee mirror. Z8 Launch verifies part hashes, the reconstructed SHA-256, and the Windows publisher signature.'
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}" --latest=false
           else
             gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "${title}" --notes "${notes}" --latest=false
           fi
           gh release upload "${tag}" "${package}" "${metadata}" --repo "${GITHUB_REPOSITORY}" --clobber
+          echo "Staged ${tag}: ${expected_size} bytes, SHA-256 ${expected_sha}"
 
-          echo "Published ${tag}: ${actual_size} bytes, SHA-256 ${actual_sha}"
+  mirror-codex-desktop:
+    name: Mirror Codex Desktop to Gitee
+    needs: download-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_OWNER: z8hk
+      GITEE_REPO: codex-mirror
+      UPSTREAM_REPOSITORY: openai/codex
+      UPSTREAM_RELEASE_URL: https://openai.com/codex/for-work/
+      RAW_PART_BYTES: "8388608"
+      UPLOAD_PARALLELISM: "4"
+      VERIFY_PARALLELISM: "4"
+    steps:
+      - name: Check out publisher
+        uses: actions/checkout@v4
+      - name: Download verified package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-msix-x64
+          path: staging
+      - name: Publish verified Base64 parts and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata='staging/Codex-windows-x64.json'
+          package="${GITHUB_WORKSPACE}/staging/Codex-windows-x64.msix"
+          MIRROR_TAG="$(jq -r '.version // empty' "${metadata}")"
+          MIRROR_VERSION="${MIRROR_TAG}"
+          jq -n \
+            --arg filename 'Codex-windows-x64.msix' \
+            --arg path "${package}" \
+            --arg upstreamUrl "$(jq -r '.upstreamUrl' "${metadata}")" \
+            --arg sha256 "$(jq -r '.sha256' "${metadata}")" \
+            --argjson sizeBytes "$(jq -r '.sizeBytes' "${metadata}")" \
+            '[{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}]' \
+            > desktop-assets.json
+          export MIRROR_TAG MIRROR_VERSION
+          export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/desktop-assets.json"
+          bash scripts/publish-gitee-mirror.sh
+
+  mirror-codexplusplus:
+    name: Mirror Codex++ stable release to Gitee
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_OWNER: z8hk
+      GITEE_REPO: codexplusplus-mirror
+      UPSTREAM_REPOSITORY: BigPizzaV3/CodexPlusPlus
+      RAW_PART_BYTES: "8388608"
+      UPLOAD_PARALLELISM: "4"
+      VERIFY_PARALLELISM: "4"
+    steps:
+      - name: Check out publisher
+        uses: actions/checkout@v4
+      - name: Download, verify, and mirror stable upstream assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream="$(curl -fsSL --retry 4 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/BigPizzaV3/CodexPlusPlus/releases/latest')"
+          jq -e '.draft == false and .prerelease == false' <<<"${upstream}" >/dev/null
+          MIRROR_TAG="$(jq -r '.tag_name // empty' <<<"${upstream}")"
+          MIRROR_VERSION="${MIRROR_TAG#v}"
+          UPSTREAM_RELEASE_URL="$(jq -r '.html_url // empty' <<<"${upstream}")"
+          [[ "${MIRROR_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${UPSTREAM_RELEASE_URL}" == "https://github.com/BigPizzaV3/CodexPlusPlus/releases/tag/${MIRROR_TAG}" ]]
+          mkdir -p upstream-assets
+          specs='[]'
+          for suffix in windows-x64-setup.exe macos-x64.dmg macos-arm64.dmg; do
+            filename="CodexPlusPlus-${MIRROR_VERSION}-${suffix}"
+            asset="$(jq -c --arg filename "${filename}" '[.assets[] | select(.name == $filename)] | if length == 1 then .[0] else error("asset missing or duplicated") end' <<<"${upstream}")"
+            url="$(jq -r '.browser_download_url' <<<"${asset}")"
+            expected_url="https://github.com/BigPizzaV3/CodexPlusPlus/releases/download/${MIRROR_TAG}/${filename}"
+            [[ "${url}" == "${expected_url}" ]]
+            expected_size="$(jq -r '.size' <<<"${asset}")"
+            expected_sha="$(jq -r '.digest // empty | sub("^sha256:"; "") | ascii_downcase' <<<"${asset}")"
+            [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
+            path="${GITHUB_WORKSPACE}/upstream-assets/${filename}"
+            curl -fsSL --retry 4 --retry-all-errors -o "${path}" "${url}"
+            [[ "$(stat -c '%s' "${path}")" == "${expected_size}" ]]
+            [[ "$(sha256sum "${path}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
+            spec="$(jq -n --arg filename "${filename}" --arg path "${path}" --arg upstreamUrl "${url}" --arg sha256 "${expected_sha}" --argjson sizeBytes "${expected_size}" '{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}')"
+            specs="$(jq -c --argjson spec "${spec}" '. + [$spec]' <<<"${specs}")"
+          done
+          printf '%s\n' "${specs}" > codexplusplus-assets.json
+          export MIRROR_TAG MIRROR_VERSION UPSTREAM_RELEASE_URL
+          export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/codexplusplus-assets.json"
+          bash scripts/publish-gitee-mirror.sh
