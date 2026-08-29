@@ -185,7 +185,7 @@ upload_part() {
   upload_json="${part}.upload.json"
   echo "Uploading ${name}"
   status="$(curl -sS -o "${upload_json}" -w '%{http_code}' \
-    --connect-timeout 30 --max-time 900 --retry 2 --retry-all-errors --retry-delay 5 \
+    --connect-timeout 30 --max-time 1800 --retry 4 --retry-all-errors --retry-delay 5 \
     -X POST -H "${auth}" -H 'Expect:' \
     -F "file=@${part};filename=${name}" \
     "${api}/releases/${release_id}/attach_files")" || true

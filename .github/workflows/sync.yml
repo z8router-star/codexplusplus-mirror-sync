@@ -124,8 +124,8 @@ jobs:
       UPSTREAM_REPOSITORY: openai/codex
       UPSTREAM_RELEASE_URL: https://openai.com/codex/for-work/
       RAW_PART_BYTES: "8388608"
-      UPLOAD_PARALLELISM: "4"
-      VERIFY_PARALLELISM: "4"
+      UPLOAD_PARALLELISM: "8"
+      VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
         uses: actions/checkout@v4
@@ -165,8 +165,8 @@ jobs:
       GITEE_REPO: codexplusplus-mirror
       UPSTREAM_REPOSITORY: BigPizzaV3/CodexPlusPlus
       RAW_PART_BYTES: "8388608"
-      UPLOAD_PARALLELISM: "4"
-      VERIFY_PARALLELISM: "4"
+      UPLOAD_PARALLELISM: "8"
+      VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
         uses: actions/checkout@v4
