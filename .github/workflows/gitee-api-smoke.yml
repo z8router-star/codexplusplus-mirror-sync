@@ -59,7 +59,7 @@ jobs:
           expected_size="$(stat -c '%s' "${probe}")"
           expected_sha="$(sha256sum "${probe}" | awk '{print tolower($1)}')"
           upload_json="${work}/upload.json"
-          upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 300 --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Expect:' -F "file=@${probe};filename=${asset_name}" "${api}/releases/${release_id}/attach_files")"
+          upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 300 --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Expect:' -F "file=@${probe};filename=${asset_name}" "${api}/releases/${release_id}/attach_files")" || true
           if [[ ! "${upload_status}" =~ ^2[0-9][0-9]$ ]]; then
             echo "::error::Gitee probe upload failed (HTTP ${upload_status})"
             jq -c '{message:.message,error:.error,errors:.errors}' "${upload_json}" 2>/dev/null || true
