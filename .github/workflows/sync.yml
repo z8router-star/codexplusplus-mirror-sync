@@ -77,7 +77,7 @@ jobs:
             version="${tag#v}"
             release_url="$(jq -r '.html_url // empty' <<<"${upstream}")"
             [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Invalid upstream tag: ${tag}"; exit 1; }
-            selected_assets="$(jq -c --arg version "${version}" '[.assets[] | select(.name == ("CodexPlusPlus-" + $version + "-windows-x64-setup.exe") or .name == ("CodexPlusPlus-" + $version + "-macos-x64.dmg") or .name == ("CodexPlusPlus-" + $version + "-macos-arm64.dmg"))] | map({name:.name,source_url:.browser_download_url,upstream_url:.browser_download_url,expected_size:.size,expected_sha:(.digest // "" | sub("^sha256:"; ""))})' <<<"${upstream}")"
+            selected_assets="$(jq -c --arg version "${version}" '[.assets[] | select(.name == ("CodexPlusPlus-" + $version + "-windows-x64-setup.exe") or .name == ("CodexPlusPlus-" + $version + "-macos-x64.dmg") or .name == ("CodexPlusPlus-" + $version + "-macos-arm64.dmg"))] | map({name:.name,source_url:.browser_download_url,source_urls:[.browser_download_url],upstream_url:.browser_download_url,expected_size:.size,expected_sha:(.digest // "" | sub("^sha256:"; ""))})' <<<"${upstream}")"
             [[ "$(jq 'length' <<<"${selected_assets}")" == 3 ]] || { echo "::error::CodexPlusPlus release is missing a required target"; exit 1; }
           else
             upstream_repo='openai/codex'
@@ -89,7 +89,7 @@ jobs:
                 architecture="${ASSET_MODE##*_}"
                 if resolved="$(pwsh -NoProfile -File scripts/resolve-codex-msix.ps1 -Architecture "${architecture}")"; then
                   msix_name="Codex-windows-${architecture}.msix"
-                  selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
+          selected_assets="$(jq -c --arg name "${msix_name}" --arg source "$(jq -r '.url' <<<"${resolved}")" --arg upstream "${store_url}" --argjson sources "$(jq -c '.urls // [.url]' <<<"${resolved}")" --argjson size "$(jq -r '.size' <<<"${resolved}")" '. + [{name:$name,source_url:$source,source_urls:$sources,upstream_url:$upstream,expected_size:$size,expected_sha:""}]' <<<"${selected_assets}")"
                   desktop_version="$(jq -r '.version // empty' <<<"${resolved}")"
                 else
                   echo "::error::Microsoft Store did not expose a stable ${architecture} Codex package"
@@ -97,7 +97,7 @@ jobs:
                 fi
                 ;;
               codex_desktop_macos)
-                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,upstream_url:$arm,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
+                selected_assets="$(jq -c --arg arm 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' '. + [{name:"Codex-mac-arm64.dmg",source_url:$arm,source_urls:[$arm],upstream_url:$arm,expected_size:0,expected_sha:""}]' <<<"${selected_assets}")"
                 ;;
               *)
                 echo "::error::Unsupported desktop asset mode: ${ASSET_MODE}"
@@ -238,11 +238,21 @@ jobs:
           while IFS= read -r asset; do
             name="$(jq -r '.name' <<<"${asset}")"
             source_url="$(jq -r '.source_url' <<<"${asset}")"
+            source_urls="$(jq -c '.source_urls // [.source_url]' <<<"${asset}")"
             upstream_url="$(jq -r '.upstream_url' <<<"${asset}")"
             expected_size="$(jq -r '.expected_size' <<<"${asset}")"
             expected_sha="$(jq -r '.expected_sha' <<<"${asset}")"
             file="${work}/${name}"
-            download_upstream_asset "${source_url}" "${file}"
+            downloaded=false
+            while IFS= read -r candidate_url; do
+              [[ -n "${candidate_url}" ]] || continue
+              if download_upstream_asset "${candidate_url}" "${file}"; then
+                downloaded=true
+                source_url="${candidate_url}"
+                break
+              fi
+            done < <(jq -r '.[]' <<<"${source_urls}")
+            [[ "${downloaded}" == true ]] || { echo "::error::Unable to download upstream asset: ${name}"; exit 1; }
             actual_size="$(stat -c '%s' "${file}")"
             actual_sha="$(sha256sum "${file}" | awk '{print tolower($1)}')"
             [[ "${actual_size}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Empty upstream asset: ${name}"; exit 1; }
@@ -298,7 +308,7 @@ jobs:
 
           content="$(base64 -w0 "${manifest}")"
           existing="$(curl -sS -H "${auth}" "${api}/contents/latest.json?ref=master")"
-          sha="$(jq -r '.sha // empty' <<<"${existing}")"
+          sha="$(jq -r 'if type == "object" then (.sha // empty) else empty end' <<<"${existing}")"
           payload="$(jq -n --arg message "sync latest ${version}" --arg content "${content}" --arg branch master --arg sha "${sha}" 'if $sha == "" then {message:$message,content:$content,branch:$branch} else {message:$message,content:$content,branch:$branch,sha:$sha} end')"
           curl -fsSL --retry 4 --retry-all-errors -X PUT -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/contents/latest.json" >/dev/null
           echo "Synced ${upstream_repo} ${tag} to https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/tag/${tag}"

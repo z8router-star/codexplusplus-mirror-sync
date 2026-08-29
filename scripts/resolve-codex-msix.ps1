@@ -54,4 +54,5 @@ if ($null -eq $selected -or [string]::IsNullOrWhiteSpace($selected.Url)) { throw
     version = [regex]::Match([string]$item.FileName, 'OpenAI\.Codex_(?<version>\d+\.\d+\.\d+\.\d+)_').Groups['version'].Value
     size = [long]$selected.Size
     url = [string]$selected.Url
+    urls = @($candidates | ForEach-Object { [string]$_.Url })
 } | ConvertTo-Json -Compress
