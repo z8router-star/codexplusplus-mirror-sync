@@ -114,6 +114,7 @@ jobs:
 
   mirror-codex-desktop:
     name: Mirror Codex Desktop to Gitee
+    if: vars.R2_BUCKET == '' || vars.R2_PUBLIC_BASE_URL == ''
     needs: download-windows
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -154,8 +155,58 @@ jobs:
           export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/desktop-assets.json"
           bash scripts/publish-gitee-mirror.sh
 
+  mirror-codex-desktop-r2:
+    name: Mirror Codex Desktop to Cloudflare R2
+    if: vars.R2_BUCKET != '' && vars.R2_PUBLIC_BASE_URL != ''
+    needs: download-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_OWNER: z8hk
+      GITEE_REPO: codex-mirror
+      UPSTREAM_REPOSITORY: openai/codex
+      UPSTREAM_RELEASE_URL: https://openai.com/codex/for-work/
+      RAW_PART_BYTES: "50331648"
+      UPLOAD_PARALLELISM: "8"
+      VERIFY_PARALLELISM: "8"
+    steps:
+      - name: Check out publisher
+        uses: actions/checkout@v4
+      - name: Download verified package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-msix-x64
+          path: staging
+      - name: Publish raw R2 parts and Gitee pointer
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata='staging/Codex-windows-x64.json'
+          package="${GITHUB_WORKSPACE}/staging/Codex-windows-x64.msix"
+          MIRROR_TAG="$(jq -r '.version // empty' "${metadata}")"
+          MIRROR_VERSION="${MIRROR_TAG}"
+          jq -n \
+            --arg filename 'Codex-windows-x64.msix' \
+            --arg path "${package}" \
+            --arg upstreamUrl "$(jq -r '.upstreamUrl' "${metadata}")" \
+            --arg sha256 "$(jq -r '.sha256' "${metadata}")" \
+            --argjson sizeBytes "$(jq -r '.sizeBytes' "${metadata}")" \
+            '[{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}]' \
+            > desktop-assets.json
+          export MIRROR_TAG MIRROR_VERSION
+          export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/desktop-assets.json"
+          bash scripts/publish-r2-mirror.sh
+
   mirror-codexplusplus:
     name: Mirror Codex++ stable release to Gitee
+    if: vars.R2_BUCKET == '' || vars.R2_PUBLIC_BASE_URL == ''
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -208,3 +259,66 @@ jobs:
           export MIRROR_TAG MIRROR_VERSION UPSTREAM_RELEASE_URL
           export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/codexplusplus-assets.json"
           bash scripts/publish-gitee-mirror.sh
+
+  mirror-codexplusplus-r2:
+    name: Mirror Codex++ stable release to Cloudflare R2
+    if: vars.R2_BUCKET != '' && vars.R2_PUBLIC_BASE_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_OWNER: z8hk
+      GITEE_REPO: codexplusplus-mirror
+      UPSTREAM_REPOSITORY: BigPizzaV3/CodexPlusPlus
+      RAW_PART_BYTES: "50331648"
+      UPLOAD_PARALLELISM: "8"
+      VERIFY_PARALLELISM: "8"
+    steps:
+      - name: Check out publisher
+        uses: actions/checkout@v4
+      - name: Download, verify, and mirror stable upstream assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream="$(curl -fsSL --retry 4 --retry-all-errors \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/BigPizzaV3/CodexPlusPlus/releases/latest')"
+          jq -e '.draft == false and .prerelease == false' <<<"${upstream}" >/dev/null
+          MIRROR_TAG="$(jq -r '.tag_name // empty' <<<"${upstream}")"
+          MIRROR_VERSION="${MIRROR_TAG#v}"
+          UPSTREAM_RELEASE_URL="$(jq -r '.html_url // empty' <<<"${upstream}")"
+          [[ "${MIRROR_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${UPSTREAM_RELEASE_URL}" == "https://github.com/BigPizzaV3/CodexPlusPlus/releases/tag/${MIRROR_TAG}" ]]
+          mkdir -p upstream-assets
+          specs='[]'
+          for suffix in windows-x64-setup.exe macos-x64.dmg macos-arm64.dmg; do
+            filename="CodexPlusPlus-${MIRROR_VERSION}-${suffix}"
+            asset="$(jq -c --arg filename "${filename}" '[.assets[] | select(.name == $filename)] | if length == 1 then .[0] else error("asset missing or duplicated") end' <<<"${upstream}")"
+            url="$(jq -r '.browser_download_url' <<<"${asset}")"
+            expected_url="https://github.com/BigPizzaV3/CodexPlusPlus/releases/download/${MIRROR_TAG}/${filename}"
+            [[ "${url}" == "${expected_url}" ]]
+            expected_size="$(jq -r '.size' <<<"${asset}")"
+            expected_sha="$(jq -r '.digest // empty | sub("^sha256:"; "") | ascii_downcase' <<<"${asset}")"
+            [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
+            path="${GITHUB_WORKSPACE}/upstream-assets/${filename}"
+            curl -fsSL --retry 4 --retry-all-errors -o "${path}" "${url}"
+            [[ "$(stat -c '%s' "${path}")" == "${expected_size}" ]]
+            [[ "$(sha256sum "${path}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
+            spec="$(jq -n --arg filename "${filename}" --arg path "${path}" --arg upstreamUrl "${url}" --arg sha256 "${expected_sha}" --argjson sizeBytes "${expected_size}" '{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}')"
+            specs="$(jq -c --argjson spec "${spec}" '. + [$spec]' <<<"${specs}")"
+          done
+          printf '%s\n' "${specs}" > codexplusplus-assets.json
+          export MIRROR_TAG MIRROR_VERSION UPSTREAM_RELEASE_URL
+          export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/codexplusplus-assets.json"
+          bash scripts/publish-r2-mirror.sh
