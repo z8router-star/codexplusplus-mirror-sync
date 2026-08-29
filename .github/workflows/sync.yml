@@ -310,5 +310,11 @@ jobs:
           existing="$(curl -sS -H "${auth}" "${api}/contents/latest.json?ref=master")"
           sha="$(jq -r 'if type == "object" then (.sha // empty) else empty end' <<<"${existing}")"
           payload="$(jq -n --arg message "sync latest ${version}" --arg content "${content}" --arg branch master --arg sha "${sha}" 'if $sha == "" then {message:$message,content:$content,branch:$branch} else {message:$message,content:$content,branch:$branch,sha:$sha} end')"
-          curl -fsSL --retry 4 --retry-all-errors -X PUT -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/contents/latest.json" >/dev/null
+          latest_json_response="${work}/latest-json-response.json"
+          latest_json_status="$(curl -sS -o "${latest_json_response}" -w '%{http_code}' --retry 4 --retry-all-errors -X PUT -H "${auth}" -H 'Content-Type: application/json' -d "${payload}" "${api}/contents/latest.json")"
+          [[ "${latest_json_status}" =~ ^2[0-9][0-9]$ ]] || {
+            echo "::error::Gitee latest.json update failed (HTTP ${latest_json_status})" >&2
+            jq -c '{keys:(keys // []),message:.message,detail:.detail,error:.error,errors:.errors}' "${latest_json_response}" >&2 2>/dev/null || head -c 1000 "${latest_json_response}" >&2 || true
+            exit 1
+          }
           echo "Synced ${upstream_repo} ${tag} to https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/tag/${tag}"
