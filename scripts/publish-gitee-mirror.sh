@@ -50,13 +50,15 @@ if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
     --arg tag "${MIRROR_TAG}" \
     --arg version "${MIRROR_VERSION}" \
     --slurpfile expected "${normalized_assets}" '
+      . as $manifest |
       .schemaVersion == 3 and
       .mirrorRepository == $repository and
       .tag == $tag and
       .version == $version and
       (.assets | length) == ($expected[0] | length) and
-      all($expected[0][] as $asset;
-        any(.assets[];
+      all($expected[0][];
+        . as $asset |
+        any($manifest.assets[];
           .filename == $asset.filename and
           .sizeBytes == $asset.sizeBytes and
           (.sha256 | ascii_downcase) == $asset.sha256 and
