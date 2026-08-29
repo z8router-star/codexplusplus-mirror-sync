@@ -247,6 +247,7 @@ jobs:
             actual_size=0
             actual_sha=''
             while IFS= read -r candidate_url; do
+              candidate_url="$(printf '%s' "${candidate_url}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
               [[ -n "${candidate_url}" ]] || continue
               if download_upstream_asset "${candidate_url}" "${file}"; then
                 candidate_size="$(stat -c '%s' "${file}")"
