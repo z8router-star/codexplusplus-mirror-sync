@@ -30,6 +30,7 @@ jobs:
 
           release_json="${work}/release.json"
           status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
+          echo "Release lookup HTTP ${status}"
           if [[ "${status}" == '404' ]]; then
             tag_json="${work}/tag.json"
             tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
@@ -37,16 +38,29 @@ jobs:
               tag_payload="$(jq -n --arg tag "${tag}" '{tag_name:$tag,refs:"master"}')"
               tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${tag_payload}" "${api}/tags")"
             fi
-            [[ "${tag_status}" =~ ^2[0-9][0-9]$ ]]
+            echo "Tag ensure HTTP ${tag_status}"
+            if [[ ! "${tag_status}" =~ ^2[0-9][0-9]$ ]]; then
+              jq -c '{message:.message,error:.error,errors:.errors}' "${tag_json}" 2>/dev/null || true
+              exit 1
+            fi
 
             release_payload="$(jq -n --arg tag "${tag}" '{tag_name:$tag,name:"Z8 Gitee API upload probe",body:"Temporary bounded probe for the Z8 domestic mirror transport.",target_commitish:"master",prerelease:true}')"
             status="$(curl -sS -o "${release_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Content-Type: application/json' -d "${release_payload}" "${api}/releases")"
           fi
-          [[ "${status}" =~ ^2[0-9][0-9]$ ]]
+          echo "Release ready HTTP ${status}"
+          if [[ ! "${status}" =~ ^2[0-9][0-9]$ ]]; then
+            jq -c '{message:.message,error:.error,errors:.errors}' "${release_json}" 2>/dev/null || true
+            exit 1
+          fi
           release_id="$(jq -r '.id // .release.id // .data.id // empty' "${release_json}")"
-          [[ "${release_id}" =~ ^[0-9]+$ ]]
+          if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
+            echo '::error::Gitee response did not contain a numeric release id'
+            exit 1
+          fi
+          echo 'Release id verified'
 
           existing="$(curl -fsSL --retry 4 --retry-all-errors -H "${auth}" "${api}/releases/${release_id}/attach_files?per_page=100")"
+          echo 'Attachment list received'
           while IFS=$'\t' read -r id name; do
             [[ -n "${id}" && "${id}" != 'null' ]] || continue
             if [[ "${name}" == "${asset_name}" ]]; then
@@ -59,6 +73,7 @@ jobs:
           expected_size="$(stat -c '%s' "${probe}")"
           expected_sha="$(sha256sum "${probe}" | awk '{print tolower($1)}')"
           upload_json="${work}/upload.json"
+          echo "Starting bounded upload (${expected_size} bytes)"
           upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --connect-timeout 30 --max-time 300 --retry 4 --retry-all-errors -X POST -H "${auth}" -H 'Expect:' -F "file=@${probe};filename=${asset_name}" "${api}/releases/${release_id}/attach_files")" || true
           if [[ ! "${upload_status}" =~ ^2[0-9][0-9]$ ]]; then
             echo "::error::Gitee probe upload failed (HTTP ${upload_status})"
