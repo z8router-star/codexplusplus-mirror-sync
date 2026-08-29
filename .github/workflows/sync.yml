@@ -218,7 +218,11 @@ jobs:
             local file="$1" name="$2" expected_size="$3" expected_sha="$4"
             delete_named_asset "${name}"
             local upload_json="${work}/upload-${name//\//_}.json" upload_status
-            upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")"
+            if [[ "${RUNNER_OS}" == "Windows" ]]; then
+              upload_status="$(UPLOAD_FILE="${file}" UPLOAD_URL="${api}/releases/${release_id}/attach_files" UPLOAD_JSON="${upload_json}" pwsh -NoProfile -Command '$ProgressPreference = "SilentlyContinue"; try { $form = @{ file = Get-Item -LiteralPath $env:UPLOAD_FILE }; $response = Invoke-WebRequest -Uri $env:UPLOAD_URL -Method Post -Headers @{ Authorization = ("token " + $env:GITEE_TOKEN) } -Form $form; [IO.File]::WriteAllText($env:UPLOAD_JSON, $response.Content); [string]$response.StatusCode } catch { $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode.value__ } else { 0 }; $body = if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }; [IO.File]::WriteAllText($env:UPLOAD_JSON, $body); [string]$status }' || true)"
+            else
+              upload_status="$(curl -sS -o "${upload_json}" -w '%{http_code}' --retry 4 --retry-all-errors -X POST -H "${auth}" -F "file=@${file};filename=${name}" "${api}/releases/${release_id}/attach_files")"
+            fi
             [[ "${upload_status}" =~ ^2[0-9][0-9]$ ]] || {
               echo "::error::Gitee attachment upload failed for ${name} (HTTP ${upload_status})" >&2
               jq -c '{message:.message,error:.error,errors:.errors}' "${upload_json}" >&2 2>/dev/null || head -c 1000 "${upload_json}" >&2 || true
