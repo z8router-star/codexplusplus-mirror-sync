@@ -31,6 +31,17 @@ jobs:
           release_json="${work}/release.json"
           status="$(curl -sS -o "${release_json}" -w '%{http_code}' -H "${auth}" "${api}/releases/tags/${tag}")"
           echo "Release lookup HTTP ${status}"
+          if [[ "${status}" == '200' && "$(jq -r 'type' "${release_json}")" == 'null' ]]; then
+            releases_json="${work}/releases.json"
+            list_status="$(curl -sS -o "${releases_json}" -w '%{http_code}' -H "${auth}" "${api}/releases?per_page=100")"
+            echo "Release list fallback HTTP ${list_status}"
+            if [[ "${list_status}" =~ ^2[0-9][0-9]$ ]]; then
+              jq --arg tag "${tag}" 'map(select(.tag_name == $tag)) | first // null' "${releases_json}" > "${release_json}"
+            fi
+            if [[ "$(jq -r 'type' "${release_json}")" == 'null' ]]; then
+              status='404'
+            fi
+          fi
           if [[ "${status}" == '404' ]]; then
             tag_json="${work}/tag.json"
             tag_status="$(curl -sS -o "${tag_json}" -w '%{http_code}' -H "${auth}" "${api}/tags/${tag}")"
