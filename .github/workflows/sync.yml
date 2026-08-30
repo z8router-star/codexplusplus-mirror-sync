@@ -15,6 +15,7 @@ permissions:
 jobs:
   validate-r2-config:
     name: Validate Cloudflare R2 configuration
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -52,6 +53,7 @@ jobs:
 
   download-windows:
     name: Resolve official Codex Desktop Windows x64
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: validate-r2-config
     runs-on: windows-latest
     timeout-minutes: 45
@@ -227,15 +229,11 @@ jobs:
 
   mirror-codex-desktop-r2:
     name: Mirror Codex Desktop to Cloudflare R2
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: download-windows
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ vars.R2_BUCKET }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       MIRROR_ID: codex-mirror
       MIRROR_REPOSITORY: z8hk/codex-mirror
       R2_LATEST_KEY: z8-launch/codex-mirror/latest.json
@@ -256,6 +254,12 @@ jobs:
           path: staging
       - name: Publish raw R2 parts and stable pointer
         shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
           metadata='staging/Codex-windows-x64.json'
@@ -336,15 +340,11 @@ jobs:
 
   mirror-codexplusplus-r2:
     name: Mirror Codex++ stable release to Cloudflare R2
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: validate-r2-config
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ vars.R2_BUCKET }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       MIRROR_ID: codexplusplus-mirror
       MIRROR_REPOSITORY: z8hk/codexplusplus-mirror
       R2_LATEST_KEY: z8-launch/codexplusplus-mirror/latest.json
@@ -361,6 +361,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
           upstream="$(curl -fsSL --retry 4 --retry-all-errors \
