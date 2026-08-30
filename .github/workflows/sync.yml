@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out resolver
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download and verify complete MSIX
         shell: pwsh
         run: |
@@ -164,7 +164,7 @@ jobs:
           }
           $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $artifactRoot 'Codex-windows-x64.json') -Encoding utf8
       - name: Store verified MSIX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codex-msix-x64
           path: artifacts/
@@ -193,9 +193,9 @@ jobs:
       VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download verified package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: codex-msix-x64
           path: staging
@@ -242,9 +242,9 @@ jobs:
       VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download verified package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: codex-msix-x64
           path: staging
@@ -286,7 +286,7 @@ jobs:
       VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download, verify, and mirror stable upstream assets
         shell: bash
         run: |
@@ -346,7 +346,7 @@ jobs:
       VERIFY_PARALLELISM: "8"
     steps:
       - name: Check out publisher
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download, verify, and publish stable upstream assets
         shell: bash
         env:

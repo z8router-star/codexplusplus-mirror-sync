@@ -7,16 +7,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-# The FE3 endpoint currently serves an incomplete chain on GitHub's Linux
-# runner. The package is still verified after download by its MSIX signature.
-$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
-$PSDefaultParameterValues['Invoke-WebRequest:SkipCertificateCheck'] = $true
 
-# Reuse the public Microsoft Store resolver logic to obtain a time-limited
-# Microsoft CDN URL; only the resulting official URL is consumed below.
+# Pin the exact public resolver package before executing its download-function
+# region. The Gallery fetch uses normal certificate validation; the temporary
+# FE3 workaround is enabled only after this byte-for-byte check succeeds.
+$resolverUri = 'https://www.powershellgallery.com/api/v2/package/Get-MSStoreInstaller/1.0.1'
+$resolverSha256 = '757b9678cd2c774e8c305febbfb6fc52ce822d33cc000cb4864a8147c69aa923'
 $archive = Join-Path ([IO.Path]::GetTempPath()) 'z8-get-msstoreinstaller.zip'
 $extract = Join-Path ([IO.Path]::GetTempPath()) 'z8-get-msstoreinstaller'
-Invoke-WebRequest -Uri 'https://www.powershellgallery.com/api/v2/package/Get-MSStoreInstaller/1.0.1' -OutFile $archive
+Invoke-WebRequest -Uri $resolverUri -OutFile $archive
+$actualResolverSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualResolverSha256 -ne $resolverSha256) {
+    throw "Microsoft Store resolver digest mismatch: expected $resolverSha256, got $actualResolverSha256"
+}
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
 Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
 $source = Get-Content -Raw -LiteralPath (Join-Path $extract 'Get-MSStoreInstaller.ps1')
@@ -25,7 +28,24 @@ $end = $source.LastIndexOf('#endregion')
 if ($start -lt 0 -or $end -le $start) { throw 'Unable to load the Microsoft Store resolver functions.' }
 Invoke-Expression $source.Substring($start, $end - $start + 10)
 
-$items = @(Get-StoreURLS -ProductNumber $ProductId -Architecture $Architecture)
+# A subset of FE3 edges has served an incomplete certificate chain to hosted
+# runners. Keep this exception scoped to the already-pinned resolver call and
+# restore the PowerShell defaults immediately afterwards. The workflow still
+# accepts only Microsoft's CDN host and verifies MSIX identity + Authenticode.
+$restSkipKey = 'Invoke-RestMethod:SkipCertificateCheck'
+$webSkipKey = 'Invoke-WebRequest:SkipCertificateCheck'
+$hadRestSkip = $PSDefaultParameterValues.ContainsKey($restSkipKey)
+$hadWebSkip = $PSDefaultParameterValues.ContainsKey($webSkipKey)
+$previousRestSkip = $PSDefaultParameterValues[$restSkipKey]
+$previousWebSkip = $PSDefaultParameterValues[$webSkipKey]
+try {
+    $PSDefaultParameterValues[$restSkipKey] = $true
+    $PSDefaultParameterValues[$webSkipKey] = $true
+    $items = @(Get-StoreURLS -ProductNumber $ProductId -Architecture $Architecture)
+} finally {
+    if ($hadRestSkip) { $PSDefaultParameterValues[$restSkipKey] = $previousRestSkip } else { $PSDefaultParameterValues.Remove($restSkipKey) }
+    if ($hadWebSkip) { $PSDefaultParameterValues[$webSkipKey] = $previousWebSkip } else { $PSDefaultParameterValues.Remove($webSkipKey) }
+}
 $item = $items | Where-Object { $_.FileName -match "OpenAI\.Codex_(?<version>\d+\.\d+\.\d+\.\d+)_${Architecture}_" } | Select-Object -First 1
 if ($null -eq $item) { throw "Microsoft Store returned no OpenAI.Codex $Architecture MSIX." }
 
