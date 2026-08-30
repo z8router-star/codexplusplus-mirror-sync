@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${R2_ACCOUNT_ID:?Set the CLOUDFLARE_ACCOUNT_ID repository variable}"
+: "${R2_ACCOUNT_ID:?Set the CLOUDFLARE_ACCOUNT_ID repository secret}"
 : "${R2_ACCESS_KEY_ID:?Set the R2_ACCESS_KEY_ID repository secret}"
 : "${R2_SECRET_ACCESS_KEY:?Set the R2_SECRET_ACCESS_KEY repository secret}"
 : "${R2_BUCKET:?Set the R2_BUCKET repository variable}"
 : "${R2_PUBLIC_BASE_URL:?Set the R2_PUBLIC_BASE_URL repository variable}"
-: "${GITEE_TOKEN:?Set the GITEE_TOKEN repository secret}"
-: "${GITEE_OWNER:?Set GITEE_OWNER}"
-: "${GITEE_REPO:?Set GITEE_REPO}"
+: "${MIRROR_ID:?Set MIRROR_ID (for example codex-mirror)}"
+: "${MIRROR_REPOSITORY:?Set MIRROR_REPOSITORY (for example z8hk/codex-mirror)}"
 : "${UPSTREAM_REPOSITORY:?Set UPSTREAM_REPOSITORY}"
 : "${UPSTREAM_RELEASE_URL:?Set UPSTREAM_RELEASE_URL}"
 : "${MIRROR_TAG:?Set MIRROR_TAG}"
@@ -19,24 +18,42 @@ RAW_PART_BYTES="${RAW_PART_BYTES:-50331648}"
 UPLOAD_PARALLELISM="${UPLOAD_PARALLELISM:-8}"
 VERIFY_PARALLELISM="${VERIFY_PARALLELISM:-8}"
 R2_PUBLIC_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
-R2_PREFIX="${R2_PREFIX:-z8-launch/${GITEE_REPO}/${MIRROR_TAG}}"
+R2_PREFIX="${R2_PREFIX:-z8-launch/${MIRROR_ID}/${MIRROR_TAG}}"
+R2_LATEST_KEY="${R2_LATEST_KEY:-z8-launch/${MIRROR_ID}/latest.json}"
 R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 # AWS CLI only reads the standard credential variable names. Keep the
 # workflow-facing R2 names while mapping them in memory for every S3 call.
 export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
-GITEE_API="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
-GITEE_AUTH="Authorization: token ${GITEE_TOKEN}"
+
+for required_command in aws curl jq split sha256sum stat xargs; do
+  command -v "${required_command}" >/dev/null 2>&1 || {
+    echo "::error::Required command is unavailable: ${required_command}"
+    exit 1
+  }
+done
 
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 
 [[ "${R2_ACCOUNT_ID}" =~ ^[A-Fa-f0-9]{32}$ ]]
 [[ "${R2_BUCKET}" =~ ^[A-Za-z0-9._-]{1,63}$ ]]
-[[ "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/?#]+(/[^/?#]+)*$ ]]
-[[ "${R2_PREFIX}" =~ ^[A-Za-z0-9._/-]+$ ]]
+[[ "${R2_PUBLIC_BASE_URL}" == "https://download.z8.hk" ]]
+[[ "${MIRROR_ID}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
+[[ "${MIRROR_REPOSITORY}" =~ ^[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,128}$ ]]
+[[ "${R2_PREFIX}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]
+[[ "${R2_LATEST_KEY}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]
 [[ "${MIRROR_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]
 [[ "${MIRROR_VERSION}" =~ ^[A-Za-z0-9._-]+$ ]]
+case "${MIRROR_ID}:${MIRROR_REPOSITORY}" in
+  codex-mirror:z8hk/codex-mirror|codexplusplus-mirror:z8hk/codexplusplus-mirror) ;;
+  *)
+    echo "::error::Mirror ID and logical repository do not match"
+    exit 1
+    ;;
+esac
+[[ "${R2_PREFIX}" == "z8-launch/${MIRROR_ID}/${MIRROR_TAG}" ]]
+[[ "${R2_LATEST_KEY}" == "z8-launch/${MIRROR_ID}/latest.json" ]]
 [[ "${RAW_PART_BYTES}" =~ ^[1-9][0-9]*$ ]]
 [[ "${UPLOAD_PARALLELISM}" =~ ^[1-9][0-9]*$ ]]
 [[ "${VERIFY_PARALLELISM}" =~ ^[1-9][0-9]*$ ]]
@@ -58,15 +75,18 @@ while IFS=$'\t' read -r filename path upstream_url expected_size expected_sha; d
   [[ "${actual_sha}" == "${expected_sha}" ]]
 done < <(jq -r '.[] | [.filename,.path,.upstreamUrl,(.sizeBytes|tostring),.sha256] | @tsv' "${normalized_assets}")
 
-latest_url="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/raw/master/latest.json"
-current_manifest="${work}/current.json"
-if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
-  -o "${current_manifest}" "${latest_url}"; then
-  if jq -e \
-    --arg repository "${GITEE_OWNER}/${GITEE_REPO}" \
+latest_url="${R2_PUBLIC_BASE_URL}/${R2_LATEST_KEY}"
+public_prefix="${R2_PUBLIC_BASE_URL}/"
+versioned_latest_url="${public_prefix}${R2_PREFIX}/latest.json"
+
+manifest_matches_assets() {
+  local manifest_file="$1"
+  local versioned_prefix="${public_prefix}${R2_PREFIX}/"
+  jq -e \
+    --arg repository "${MIRROR_REPOSITORY}" \
     --arg tag "${MIRROR_TAG}" \
     --arg version "${MIRROR_VERSION}" \
-    --arg base "${R2_PUBLIC_BASE_URL}/" \
+    --arg prefix "${versioned_prefix}" \
     --slurpfile expected "${normalized_assets}" '
       . as $manifest |
       $manifest.schemaVersion == 3 and
@@ -82,22 +102,59 @@ if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
           .sizeBytes == $asset.sizeBytes and
           (.sha256 | ascii_downcase) == $asset.sha256 and
           (.parts | length) > 0 and
-          all(.parts[]; .encoding == "identity" and (.mirrorUrl | startswith($base)))
+          all(.parts[]; .encoding == "identity" and (.mirrorUrl | startswith($prefix)))
         )
-      )' "${current_manifest}" >/dev/null; then
+      )' "${manifest_file}" >/dev/null
+}
+
+part_metadata_matches() {
+  local mirror_url="$1"
+  local expected_size="$2"
+  local expected_sha="$3"
+  local object_key head_json head_size head_sha
+  [[ "${mirror_url}" == "${public_prefix}"* ]] || return 1
+  object_key="${mirror_url#"${public_prefix}"}"
+  [[ -n "${object_key}" && "${object_key}" != "${mirror_url}" ]] || return 1
+  head_json="$(aws s3api head-object \
+    --bucket "${R2_BUCKET}" --key "${object_key}" \
+    --endpoint-url "${R2_ENDPOINT}" --region auto --output json 2>/dev/null)" || return 1
+  head_size="$(jq -r '.ContentLength // 0' <<<"${head_json}")"
+  head_sha="$(jq -r '.Metadata.sha256 // empty' <<<"${head_json}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${head_size}" == "${expected_size}" && "${head_sha}" == "${expected_sha}" ]]
+}
+
+versioned_manifest="${work}/versioned-current.json"
+versioned_manifest_available=false
+if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
+  -H 'Cache-Control: no-cache' \
+  -o "${versioned_manifest}" "${versioned_latest_url}"; then
+  if ! manifest_matches_assets "${versioned_manifest}"; then
+    echo "::error::Refusing to overwrite an immutable R2 version prefix with different bytes"
+    exit 1
+  fi
+  versioned_manifest_available=true
+fi
+
+current_manifest="${work}/current.json"
+if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
+  -H 'Cache-Control: no-cache' \
+  -o "${current_manifest}" "${latest_url}"; then
+  if jq -e --arg tag "${MIRROR_TAG}" --arg version "${MIRROR_VERSION}" \
+    '.tag == $tag and .version == $version' "${current_manifest}" >/dev/null 2>&1 \
+    && ! manifest_matches_assets "${current_manifest}"; then
+    echo "::error::Refusing to replace a stable pointer with different bytes for the same tag"
+    exit 1
+  fi
+  if manifest_matches_assets "${current_manifest}"; then
     all_parts_present=true
-    public_prefix="${R2_PUBLIC_BASE_URL}/"
-    while IFS= read -r mirror_url; do
-      object_key="${mirror_url#"${public_prefix}"}"
-      if [[ "${object_key}" == "${mirror_url}" ]] || ! aws s3api head-object \
-        --bucket "${R2_BUCKET}" --key "${object_key}" \
-        --endpoint-url "${R2_ENDPOINT}" --region auto >/dev/null 2>&1; then
+    while IFS=$'\t' read -r mirror_url expected_size expected_sha; do
+      if ! part_metadata_matches "${mirror_url}" "${expected_size}" "${expected_sha}"; then
         all_parts_present=false
         break
       fi
-    done < <(jq -r '.assets[].parts[].mirrorUrl' "${current_manifest}")
-    if [[ "${all_parts_present}" == true ]]; then
-      echo "R2 mirror already current: ${GITEE_OWNER}/${GITEE_REPO} ${MIRROR_TAG}"
+    done < <(jq -r '.assets[].parts[] | [.mirrorUrl,.sizeBytes,.sha256] | @tsv' "${current_manifest}")
+    if [[ "${versioned_manifest_available}" == true && "${all_parts_present}" == true ]]; then
+      echo "R2 mirror already current: ${MIRROR_ID} ${MIRROR_TAG}"
       exit 0
     fi
   fi
@@ -133,22 +190,46 @@ while IFS=$'\t' read -r filename path _ _ _; do
 done < <(jq -r '.[] | [.filename,.path,.upstreamUrl,(.sizeBytes|tostring),.sha256] | @tsv' "${normalized_assets}")
 
 upload_part() {
-  local part name object_key
+  local part name object_key part_size part_sha head_json existing_path existing_size existing_sha
   part="$1"
   name="${part##*/}"
+  part_size="$(stat -c '%s' "${part}")"
+  part_sha="$(sha256sum "${part}" | awk '{print tolower($1)}')"
   object_key="${R2_PREFIX}/${name}"
+  if head_json="$(aws s3api head-object \
+    --bucket "${R2_BUCKET}" --key "${object_key}" \
+    --endpoint-url "${R2_ENDPOINT}" --region auto --output json 2>/dev/null)"; then
+    if [[ "$(jq -r '.ContentLength // 0' <<<"${head_json}")" == "${part_size}" \
+      && "$(jq -r '.Metadata.sha256 // empty' <<<"${head_json}" | tr '[:upper:]' '[:lower:]')" == "${part_sha}" ]]; then
+      echo "R2 part already verified ${name}"
+      return 0
+    fi
+    # Older R2 objects predate the metadata field. Re-read them before adding
+    # metadata; a same-tag object with different bytes is never overwritten.
+    existing_path="${work}/existing-${name}"
+    curl -fsSL --connect-timeout 30 --max-time 900 --retry 3 --retry-all-errors \
+      -o "${existing_path}" "${public_prefix}${object_key}"
+    existing_size="$(stat -c '%s' "${existing_path}")"
+    existing_sha="$(sha256sum "${existing_path}" | awk '{print tolower($1)}')"
+    rm -f "${existing_path}"
+    if [[ "${existing_size}" != "${part_size}" || "${existing_sha}" != "${part_sha}" ]]; then
+      echo "::error::Immutable R2 part differs from the verified upstream bytes: ${name}"
+      return 1
+    fi
+  fi
   echo "Uploading R2 ${name}"
   aws s3 cp "${part}" "s3://${R2_BUCKET}/${object_key}" \
     --endpoint-url "${R2_ENDPOINT}" \
     --region auto \
     --content-type application/octet-stream \
+    --metadata "sha256=${part_sha}" \
     --cache-control 'public,max-age=31536000,immutable' \
     --only-show-errors
 }
 export -f upload_part
-export R2_BUCKET R2_PREFIX R2_ENDPOINT
+export work public_prefix R2_BUCKET R2_PREFIX R2_ENDPOINT
 find "${parts_dir}" -maxdepth 1 -type f -print0 | \
-  xargs -0 -n 1 -P "${UPLOAD_PARALLELISM}" bash -c 'upload_part "$1"' _
+  xargs -0 -n 1 -P "${UPLOAD_PARALLELISM}" bash -c 'set -euo pipefail; upload_part "$1"' _
 
 verify_part() {
   local meta filename url expected_size expected_sha downloaded actual_size actual_sha
@@ -172,7 +253,7 @@ mkdir -p "${verify_dir}"
 export -f verify_part
 export verify_dir
 find "${meta_dir}" -maxdepth 1 -type f -name '*.json' -print0 | \
-  xargs -0 -n 1 -P "${VERIFY_PARALLELISM}" bash -c 'verify_part "$1"' _
+  xargs -0 -n 1 -P "${VERIFY_PARALLELISM}" bash -c 'set -euo pipefail; verify_part "$1"' _
 
 manifest_assets='[]'
 while IFS=$'\t' read -r filename _ upstream_url size_bytes sha256; do
@@ -196,7 +277,7 @@ jq -n \
   --arg tag "${MIRROR_TAG}" \
   --arg version "${MIRROR_VERSION}" \
   --arg upstreamReleaseUrl "${UPSTREAM_RELEASE_URL}" \
-  --arg mirrorRepository "${GITEE_OWNER}/${GITEE_REPO}" \
+  --arg mirrorRepository "${MIRROR_REPOSITORY}" \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson assets "${manifest_assets}" \
   '{schemaVersion:3,mirrorProvider:"cloudflare_r2",upstreamRepository:$upstreamRepository,tag:$tag,version:$version,upstreamReleaseUrl:$upstreamReleaseUrl,mirrorRepository:$mirrorRepository,generatedAt:$generatedAt,assets:$assets}' \
@@ -206,36 +287,19 @@ aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${R2_PREFIX}/latest.json" \
   --endpoint-url "${R2_ENDPOINT}" --region auto \
   --content-type application/json --cache-control 'no-cache' --only-show-errors
 
-ensure_master_branch() {
-  local status payload
-  status="$(curl -sS -o /dev/null -w '%{http_code}' -H "${GITEE_AUTH}" "${GITEE_API}/branches/master")"
-  [[ "${status}" == '200' ]] && return 0
-  [[ "${status}" == '404' ]]
-  payload="$(jq -n --arg message 'initialize Z8 Launch mirror' --arg content 'WjggTGF1bmNoIG1pcnJvciBib290c3RyYXAuCg==' --arg branch master '{message:$message,content:$content,branch:$branch}')"
-  curl -fsSL --retry 3 --retry-all-errors -X POST -H "${GITEE_AUTH}" \
-    -H 'Content-Type: application/json' -d "${payload}" \
-    "${GITEE_API}/contents/.z8-launch-mirror" >/dev/null
-}
-
-ensure_master_branch
-content="$(base64 -w0 "${manifest}")"
-contents_response="${work}/contents.json"
-contents_status="$(curl -sS -o "${contents_response}" -w '%{http_code}' -H "${GITEE_AUTH}" \
-  "${GITEE_API}/contents/latest.json?ref=master")"
-sha=''
-[[ "${contents_status}" == '200' ]] && sha="$(jq -r '.sha // empty' "${contents_response}")"
-payload="$(jq -n --arg message "sync R2 latest ${MIRROR_VERSION}" --arg content "${content}" --arg branch master --arg sha "${sha}" 'if $sha == "" then {message:$message,content:$content,branch:$branch} else {message:$message,content:$content,branch:$branch,sha:$sha} end')"
-method='POST'
-[[ -n "${sha}" ]] && method='PUT'
-update_status="$(curl -sS -o "${contents_response}" -w '%{http_code}' --retry 3 --retry-all-errors \
-  -X "${method}" -H "${GITEE_AUTH}" -H 'Content-Type: application/json' \
-  -d "${payload}" "${GITEE_API}/contents/latest.json")"
-[[ "${update_status}" =~ ^2[0-9][0-9]$ ]]
+# Keep the immutable versioned manifest for auditability, then atomically
+# replace the stable pointer only after every part and the versioned object
+# have been uploaded. A failed pointer upload leaves the previous release
+# discoverable instead of exposing a partial release.
+aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${R2_LATEST_KEY}" \
+  --endpoint-url "${R2_ENDPOINT}" --region auto \
+  --content-type application/json --cache-control 'no-cache' --only-show-errors
 
 expected_manifest_sha="$(sha256sum "${manifest}" | awk '{print tolower($1)}')"
 published_manifest="${work}/published-latest.json"
 for attempt in $(seq 1 30); do
   if curl -fsSL --connect-timeout 20 --max-time 60 --retry 1 --retry-all-errors \
+    -H 'Cache-Control: no-cache' \
     -o "${published_manifest}" "${latest_url}"; then
     published_sha="$(sha256sum "${published_manifest}" | awk '{print tolower($1)}')"
     [[ "${published_sha}" == "${expected_manifest_sha}" ]] && break
@@ -244,4 +308,4 @@ for attempt in $(seq 1 30); do
 done
 [[ -f "${published_manifest}" ]]
 [[ "$(sha256sum "${published_manifest}" | awk '{print tolower($1)}')" == "${expected_manifest_sha}" ]]
-echo "Published verified R2 mirror ${GITEE_OWNER}/${GITEE_REPO} ${MIRROR_TAG} with ${part_index} raw parts"
+echo "Published verified R2 mirror ${MIRROR_ID} ${MIRROR_TAG} with ${part_index} raw parts"

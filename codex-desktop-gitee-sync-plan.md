@@ -1,7 +1,15 @@
 # Codex Desktop and Codex++ domestic mirror sync Contract
 
+> Historical contract. The active R2-only contract is
+> `codex-desktop-r2-sync-plan.md`; the Gitee pointer path described below is
+> retired because both Gitee repositories are private.
+
+> Do not re-enable this workflow or publisher as part of normal operation.
+> Cloudflare R2 is the sole active public transport; this file is retained only
+> to preserve the earlier provider evidence and rollback context.
+
 ```toml
-goal = "从官方上游 Release/Store 元数据同步未修改的 Codex Desktop 安装包与 Codex++ 到 Cloudflare R2，并在 Gitee 发布可供 Z8 Launch 校验的 latest.json 指针"
+goal = "[Historical] 从官方上游同步未修改的 Codex Desktop 安装包与 Codex++，并记录已退役的 Gitee 指针方案"
 base = "df8f4f3"
 
 [scope]
@@ -35,14 +43,12 @@ cmd = "git diff --check"
   identity, size, and SHA-256, and uploads the original bytes without
   repackaging.
 - Codex++ remains sourced from `BigPizzaV3/CodexPlusPlus` stable Releases and is published to `z8hk/codexplusplus-mirror`.
-- Codex Desktop and Codex++ are published to Cloudflare R2 as bounded raw
-  identity parts, downloaded back through the public R2 URL, and described by
-  a schema 3 `latest.json` only after every hash check passes. The manifest is
-  then written to the corresponding Gitee repository as a small domestic
-  pointer. If the R2 variables are absent, the workflow keeps the prior Gitee
-  Base64 attachment path available.
-- The R2 workflow requires the owner-provided `CLOUDFLARE_ACCOUNT_ID`,
-  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, and
-  `R2_PUBLIC_BASE_URL` values plus the existing `GITEE_TOKEN`; none are printed
-  or stored in the repository.
+- The former implementation published bounded raw identity parts to
+  Cloudflare R2 and a small `latest.json` pointer to Gitee. That transport is
+  superseded by the R2-only workflow in `codex-desktop-r2-sync-plan.md`; the
+  old Gitee Base64 attachment path is disabled and must not be treated as a
+  fallback.
+- The former workflow required owner-managed Gitee/R2 credentials. They are
+  historical evidence only; the active workflow requires only the R2 settings
+  documented in `codex-desktop-r2-sync-plan.md`.
 - Quark is out of scope. No upload to cloud drives or private server is performed.

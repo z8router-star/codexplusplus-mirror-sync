@@ -1,4 +1,4 @@
-name: Verify Gitee API attachment path
+name: '[Disabled] Historical Gitee API attachment path'
 
 on:
   workflow_dispatch:
@@ -8,7 +8,8 @@ permissions:
 
 jobs:
   verify-attachment-upload:
-    name: Upload and verify a bounded Gitee probe
+    name: Disabled historical Gitee attachment probe
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

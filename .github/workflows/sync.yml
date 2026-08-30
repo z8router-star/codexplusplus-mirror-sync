@@ -1,4 +1,4 @@
-name: Sync official Codex Desktop and Codex++ to Gitee
+name: Sync official Codex Desktop and Codex++ to Cloudflare R2
 
 on:
   schedule:
@@ -13,8 +13,33 @@ permissions:
   contents: write
 
 jobs:
+  validate-r2-config:
+    name: Validate Cloudflare R2 configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+    steps:
+      - name: Check required R2 settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${R2_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID secret is required}"
+          : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID secret is required}"
+          : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY secret is required}"
+          : "${R2_BUCKET:?R2_BUCKET variable is required}"
+          : "${R2_PUBLIC_BASE_URL:?R2_PUBLIC_BASE_URL variable is required}"
+          [[ "${R2_ACCOUNT_ID}" =~ ^[A-Fa-f0-9]{32}$ ]]
+          [[ "${R2_BUCKET}" =~ ^[A-Za-z0-9._-]{1,63}$ ]]
+          [[ "${R2_PUBLIC_BASE_URL}" == 'https://download.z8.hk' ]]
+
   download-windows:
     name: Resolve official Codex Desktop Windows x64
+    needs: validate-r2-config
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -34,8 +59,18 @@ jobs:
           $outputName = 'Codex-windows-x64.msix'
           $outputPath = Join-Path $artifactRoot $outputName
           $downloaded = $false
+          $signatureStatus = ''
+          $packagePublisher = ''
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $signtool = Get-ChildItem -LiteralPath (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin') -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signtool) { throw 'Windows SDK signtool.exe is required to verify the MSIX signature' }
           foreach ($candidate in $candidates) {
             if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+            $candidateUri = $null
+            if (-not [Uri]::TryCreate([string]$candidate, [UriKind]::Absolute, [ref]$candidateUri) -or
+                $candidateUri.Scheme -ne 'https' -or
+                $candidateUri.Host -notmatch '(^|\.)dl\.delivery\.mp\.microsoft\.com$') { continue }
             Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
             $curlArgs = @(
               '-fsSL', '--retry', '4', '--retry-all-errors',
@@ -43,16 +78,40 @@ jobs:
               '-e', 'https://openai.com/codex/for-work/',
               '-o', $outputPath, [string]$candidate
             )
-            if ([string]$candidate -like '*dl.delivery.mp.microsoft.com*') {
-              $curlArgs = @('--insecure') + $curlArgs
-            }
             & curl.exe @curlArgs
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) { continue }
+            $downloadExit = $LASTEXITCODE
+            if (($downloadExit -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) -and
+                $candidateUri.Host -match '(^|\.)dl\.delivery\.mp\.microsoft\.com$') {
+              # A few Microsoft CDN edges have presented an incomplete chain
+              # to hosted runners. Only retry without certificate validation
+              # after the normal TLS attempt, and still require the package
+              # identity plus signtool verification below.
+              Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+              & curl.exe (@('--insecure') + $curlArgs)
+              $downloadExit = $LASTEXITCODE
+            }
+            if ($downloadExit -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) { continue }
             $size = (Get-Item -LiteralPath $outputPath).Length
             if ($size -lt 104857600) { continue }
             $expectedSize = [int64]($resolved.size)
             if ($expectedSize -gt 0 -and $size -ne $expectedSize) { continue }
             $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $manifestArchive = [System.IO.Compression.ZipFile]::OpenRead($outputPath)
+            try {
+              $manifestEntry = $manifestArchive.GetEntry('AppxManifest.xml')
+              if ($null -eq $manifestEntry) { continue }
+              $manifestReader = [System.IO.StreamReader]::new($manifestEntry.Open())
+              try { [xml]$appxManifest = $manifestReader.ReadToEnd() } finally { $manifestReader.Dispose() }
+              $identity = $appxManifest.Package.Identity
+              $packagePublisher = [string]$identity.Publisher
+              if ([string]$identity.Name -ne 'OpenAI.Codex' -or
+                  $packagePublisher -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B') { continue }
+            } finally {
+              $manifestArchive.Dispose()
+            }
+            & $signtool.FullName verify /pa /all /tw $outputPath
+            if ($LASTEXITCODE -ne 0) { continue }
+            $signatureStatus = 'Valid'
             $downloaded = $true
             break
           }
@@ -64,6 +123,8 @@ jobs:
             fileName = $outputName
             sizeBytes = $size
             sha256 = $hash
+            signatureStatus = $signatureStatus
+            publisher = $packagePublisher
             upstreamUrl = 'https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
             generatedAt = [DateTime]::UtcNow.ToString('o')
           }
@@ -98,12 +159,14 @@ jobs:
           version="$(jq -r '.version // empty' "${metadata}")"
           expected_size="$(jq -r '.sizeBytes // 0' "${metadata}")"
           expected_sha="$(jq -r '.sha256 // empty' "${metadata}")"
+          [[ "$(jq -r '.signatureStatus // empty' "${metadata}")" == 'Valid' ]]
+          [[ "$(jq -r '.publisher // empty' "${metadata}")" == 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' ]]
           [[ "${version}" =~ ^[0-9]+(\.[0-9]+)+$ ]]
           [[ "$(stat -c '%s' "${package}")" == "${expected_size}" ]]
           [[ "$(sha256sum "${package}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
           tag="codex-desktop-${version}"
           title="Codex Desktop Windows x64 ${version}"
-          notes='Official Microsoft Store MSIX staged for the Z8 Gitee mirror. Z8 Launch verifies part hashes, the reconstructed SHA-256, and the Windows publisher signature.'
+          notes='Official Microsoft Store MSIX staged for the Z8 Cloudflare R2 mirror. Z8 Launch verifies part hashes, the reconstructed SHA-256, and the Windows publisher signature.'
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}" --latest=false
           else
@@ -113,9 +176,9 @@ jobs:
           echo "Staged ${tag}: ${expected_size} bytes, SHA-256 ${expected_sha}"
 
   mirror-codex-desktop:
-    name: Mirror Codex Desktop to Gitee
-    # R2 is the only artifact transport. Keep this job as a documented
-    # fallback, but never let the slow Gitee upload consume a runner slot.
+    name: '[Disabled] Historical Codex Desktop Gitee mirror'
+    # R2 is the only artifact transport. Keep this job as documented rollback
+    # material, but never let the retired Gitee upload consume a runner slot.
     if: ${{ false }}
     needs: download-windows
     runs-on: ubuntu-latest
@@ -143,6 +206,8 @@ jobs:
           set -euo pipefail
           metadata='staging/Codex-windows-x64.json'
           package="${GITHUB_WORKSPACE}/staging/Codex-windows-x64.msix"
+          [[ "$(jq -r '.signatureStatus // empty' "${metadata}")" == 'Valid' ]]
+          [[ "$(jq -r '.publisher // empty' "${metadata}")" == 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' ]]
           MIRROR_TAG="$(jq -r '.version // empty' "${metadata}")"
           MIRROR_VERSION="${MIRROR_TAG}"
           jq -n \
@@ -159,20 +224,18 @@ jobs:
 
   mirror-codex-desktop-r2:
     name: Mirror Codex Desktop to Cloudflare R2
-    if: vars.R2_BUCKET != '' && vars.R2_PUBLIC_BASE_URL != ''
     needs: download-windows
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_OWNER: z8hk
-      GITEE_REPO: codex-mirror
+      MIRROR_ID: codex-mirror
+      MIRROR_REPOSITORY: z8hk/codex-mirror
+      R2_LATEST_KEY: z8-launch/codex-mirror/latest.json
       UPSTREAM_REPOSITORY: openai/codex
       UPSTREAM_RELEASE_URL: https://openai.com/codex/for-work/
       RAW_PART_BYTES: "50331648"
@@ -186,7 +249,7 @@ jobs:
         with:
           name: codex-msix-x64
           path: staging
-      - name: Publish raw R2 parts and Gitee pointer
+      - name: Publish raw R2 parts and stable pointer
         shell: bash
         run: |
           set -euo pipefail
@@ -207,9 +270,9 @@ jobs:
           bash scripts/publish-r2-mirror.sh
 
   mirror-codexplusplus:
-    name: Mirror Codex++ stable release to Gitee
-    # R2 is the only artifact transport. Keep this job as a documented
-    # fallback, but never let the slow Gitee upload consume a runner slot.
+    name: '[Disabled] Historical Codex++ Gitee mirror'
+    # R2 is the only artifact transport. Keep this job as documented rollback
+    # material, but never let the retired Gitee upload consume a runner slot.
     if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -266,19 +329,18 @@ jobs:
 
   mirror-codexplusplus-r2:
     name: Mirror Codex++ stable release to Cloudflare R2
-    if: vars.R2_BUCKET != '' && vars.R2_PUBLIC_BASE_URL != ''
+    needs: validate-r2-config
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_OWNER: z8hk
-      GITEE_REPO: codexplusplus-mirror
+      MIRROR_ID: codexplusplus-mirror
+      MIRROR_REPOSITORY: z8hk/codexplusplus-mirror
+      R2_LATEST_KEY: z8-launch/codexplusplus-mirror/latest.json
       UPSTREAM_REPOSITORY: BigPizzaV3/CodexPlusPlus
       RAW_PART_BYTES: "50331648"
       UPLOAD_PARALLELISM: "8"
@@ -286,7 +348,7 @@ jobs:
     steps:
       - name: Check out publisher
         uses: actions/checkout@v4
-      - name: Download, verify, and mirror stable upstream assets
+      - name: Download, verify, and publish stable upstream assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
