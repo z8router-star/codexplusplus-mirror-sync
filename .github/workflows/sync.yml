@@ -114,7 +114,9 @@ jobs:
 
   mirror-codex-desktop:
     name: Mirror Codex Desktop to Gitee
-    if: vars.R2_BUCKET == '' || vars.R2_PUBLIC_BASE_URL == ''
+    # R2 is the only artifact transport. Keep this job as a documented
+    # fallback, but never let the slow Gitee upload consume a runner slot.
+    if: ${{ false }}
     needs: download-windows
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -206,7 +208,9 @@ jobs:
 
   mirror-codexplusplus:
     name: Mirror Codex++ stable release to Gitee
-    if: vars.R2_BUCKET == '' || vars.R2_PUBLIC_BASE_URL == ''
+    # R2 is the only artifact transport. Keep this job as a documented
+    # fallback, but never let the slow Gitee upload consume a runner slot.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
