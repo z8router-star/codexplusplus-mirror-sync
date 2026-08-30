@@ -21,6 +21,10 @@ VERIFY_PARALLELISM="${VERIFY_PARALLELISM:-8}"
 R2_PUBLIC_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
 R2_PREFIX="${R2_PREFIX:-z8-launch/${GITEE_REPO}/${MIRROR_TAG}}"
 R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+# AWS CLI only reads the standard credential variable names. Keep the
+# workflow-facing R2 names while mapping them in memory for every S3 call.
+export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
 GITEE_API="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
 GITEE_AUTH="Authorization: token ${GITEE_TOKEN}"
 
