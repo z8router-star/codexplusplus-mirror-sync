@@ -30,10 +30,17 @@ $item = $items | Where-Object { $_.FileName -match "OpenAI\.Codex_(?<version>\d+
 if ($null -eq $item) { throw "Microsoft Store returned no OpenAI.Codex $Architecture MSIX." }
 
 $candidates = foreach ($candidate in @($item.URLS)) {
-    # The Store service currently emits HTTP CDN URLs. Keep the resolver's
-    # original protocol; the workflow will retry the alternate protocol when
-    # a hosted runner cannot reach one of the CDN endpoints.
+    # The Store service currently emits HTTP CDN URLs, and some edges reject
+    # HTTPS during the TLS handshake. Preserve the protocol here; the workflow
+    # accepts only this exact Microsoft CDN host and requires Authenticode
+    # verification before an artifact can be published.
     $normalized = [string]$candidate
+    $candidateUri = $null
+    if (-not [Uri]::TryCreate($normalized, [UriKind]::Absolute, [ref]$candidateUri) -or
+        $candidateUri.Host -notmatch '(^|\.)dl\.delivery\.mp\.microsoft\.com$' -or
+        $candidateUri.Scheme -notin @('http', 'https')) {
+        continue
+    }
     try {
         $head = Invoke-WebRequest -Uri $normalized -Method Head
         $length = [long]$head.Headers['Content-Length']

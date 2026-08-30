@@ -29,6 +29,9 @@ cmd = "python -c \"import pathlib,yaml; p=pathlib.Path('.github/workflows/sync.y
 cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8').lower(); publisher=pathlib.Path('scripts/publish-r2-mirror.sh').read_text(encoding='utf-8').lower(); assert 'gitee_token' not in workflow.split('mirror-codex-desktop-r2:',1)[1].split('mirror-codexplusplus:',1)[0]; assert 'gitee_token' not in workflow.split('mirror-codexplusplus-r2:',1)[1]; assert 'gitee' not in publisher; assert 'https://download.z8.hk' in publisher; assert 'set -euo pipefail; upload_part' in publisher; assert 'set -euo pipefail; verify_part' in publisher; assert 'public,max-age=31536000,immutable' in publisher; assert '--cache-control ' + chr(39) + 'no-cache' + chr(39) in publisher; assert 'signtool.exe' in workflow; assert 'appxmanifest.xml' in workflow\""
 
 [[checks]]
+cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'); resolver=pathlib.Path('scripts/resolve-codex-msix.ps1').read_text(encoding='utf-8'); assert 'downloadCandidates' in workflow; assert 'candidateUri.Scheme -notin' in workflow; assert 'packageVersion' in workflow; assert 'candidateUri.Scheme -notin' in resolver\""
+
+[[checks]]
 cmd = "git diff --check"
 ```
 
@@ -36,7 +39,11 @@ cmd = "git diff --check"
 
 - GitHub upstream remains the version authority. The workflow resolves official
   Desktop metadata and stable Codex++ Release assets, verifies exact byte size
-  and SHA-256, and uploads the original bytes without repackaging. The current
+  and SHA-256, and uploads the original bytes without repackaging. Microsoft
+  Store may return HTTP CDN URLs; the workflow permits HTTP only for the exact
+  `*.dl.delivery.mp.microsoft.com` host and still requires the MSIX identity,
+  resolved version, publisher certificate, and Authenticode chain before
+  publication. The current
   Desktop scope is Windows x64 MSIX; Codex++ includes Windows x64, macOS Intel,
   and macOS Apple Silicon assets. Codex Desktop macOS remains on the official
   fallback route until a separately verified source is adopted.
@@ -71,7 +78,8 @@ cmd = "git diff --check"
 - CHG-R2-PUB-002: reject a non-owner public URL, a custom version prefix, or a
   same-tag object whose size/SHA-256 metadata differs from the verified source.
 - CHG-R2-WF-002: fail early when the five R2 settings are missing or invalid,
-  and verify the Windows MSIX package identity plus its Authenticode chain
+  and verify the Windows MSIX package identity, resolved version, and its
+  Authenticode chain
   before any R2 upload.
 - EFF-R2-WF-001 must-change: a scheduled run succeeds with only R2 credentials
   and repository variables.

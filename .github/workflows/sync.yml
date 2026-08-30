@@ -69,6 +69,25 @@ jobs:
           $resolved = ($resolvedText -join "`n") | ConvertFrom-Json
           $candidates = @($resolved.urls)
           if ($candidates.Count -eq 0 -and $resolved.url) { $candidates = @($resolved.url) }
+          $downloadCandidates = @()
+          foreach ($candidate in $candidates) {
+            $candidateUri = $null
+            if (-not [Uri]::TryCreate([string]$candidate, [UriKind]::Absolute, [ref]$candidateUri) -or
+                $candidateUri.Scheme -notin @('http', 'https') -or
+                $candidateUri.Host -notmatch '(^|\.)dl\.delivery\.mp\.microsoft\.com$') { continue }
+            $downloadCandidates += [string]$candidateUri.AbsoluteUri
+            # Microsoft currently publishes HTTP Store URLs, while some
+            # regions publish HTTPS URLs. Try the alternate scheme as a
+            # bounded fallback for the same exact CDN host.
+            $alternateBuilder = [UriBuilder]$candidateUri
+            if ($candidateUri.Scheme -eq 'http') {
+              $alternateBuilder.Scheme = 'https'
+            } else {
+              $alternateBuilder.Scheme = 'http'
+            }
+            $downloadCandidates += [string]$alternateBuilder.Uri.AbsoluteUri
+          }
+          $downloadCandidates = @($downloadCandidates | Select-Object -Unique)
           $outputName = 'Codex-windows-x64.msix'
           $outputPath = Join-Path $artifactRoot $outputName
           $downloaded = $false
@@ -78,11 +97,11 @@ jobs:
           $signtool = Get-ChildItem -LiteralPath (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin') -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
           if ($null -eq $signtool) { throw 'Windows SDK signtool.exe is required to verify the MSIX signature' }
-          foreach ($candidate in $candidates) {
+          foreach ($candidate in $downloadCandidates) {
             if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
             $candidateUri = $null
             if (-not [Uri]::TryCreate([string]$candidate, [UriKind]::Absolute, [ref]$candidateUri) -or
-                $candidateUri.Scheme -ne 'https' -or
+                $candidateUri.Scheme -notin @('http', 'https') -or
                 $candidateUri.Host -notmatch '(^|\.)dl\.delivery\.mp\.microsoft\.com$') { continue }
             Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
             $curlArgs = @(
@@ -94,7 +113,7 @@ jobs:
             & curl.exe @curlArgs
             $downloadExit = $LASTEXITCODE
             if (($downloadExit -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) -and
-                $candidateUri.Host -match '(^|\.)dl\.delivery\.mp\.microsoft\.com$') {
+                $candidateUri.Scheme -eq 'https') {
               # A few Microsoft CDN edges have presented an incomplete chain
               # to hosted runners. Only retry without certificate validation
               # after the normal TLS attempt, and still require the package
@@ -117,8 +136,10 @@ jobs:
               try { [xml]$appxManifest = $manifestReader.ReadToEnd() } finally { $manifestReader.Dispose() }
               $identity = $appxManifest.Package.Identity
               $packagePublisher = [string]$identity.Publisher
+              $packageVersion = [string]$identity.Version
               if ([string]$identity.Name -ne 'OpenAI.Codex' -or
-                  $packagePublisher -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B') { continue }
+                  $packagePublisher -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' -or
+                  $packageVersion -ne [string]$resolved.version) { continue }
             } finally {
               $manifestArchive.Dispose()
             }
