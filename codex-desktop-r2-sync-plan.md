@@ -1,7 +1,7 @@
 # Codex Desktop and Codex++ R2-only sync Contract
 
 ```toml
-goal = "从官方上游同步未修改的 Windows x64 Codex Desktop 与 Codex++ 三平台字节到 Cloudflare R2，并在所有分片验证完成后更新稳定 latest.json"
+goal = "从官方上游同步未修改的 Windows x64 Codex Desktop 与 Codex++ 三平台字节到 Cloudflare R2，并在所有分片验证完成后更新稳定 latest.json；不创建额外的 GitHub Release"
 base = "6773b2445e3b51c31fb84387d5ea2a9fa40e20db"
 
 [scope]
@@ -23,7 +23,7 @@ deny = [
 cmd = "python -c \"import pathlib,yaml; p=pathlib.Path('.github/workflows/sync.yml'); data=yaml.safe_load(p.read_text(encoding='utf-8')); assert data['name'].startswith('Sync official'); assert data['jobs']['mirror-codex-desktop-r2']['env']['MIRROR_ID']=='codex-mirror'; assert data['jobs']['mirror-codexplusplus-r2']['env']['MIRROR_ID']=='codexplusplus-mirror'; assert 'GITEE_TOKEN' not in data['jobs']['mirror-codex-desktop-r2']['env']; assert 'GITEE_TOKEN' not in data['jobs']['mirror-codexplusplus-r2']['env']\""
 
 [[checks]]
-cmd = "python -c \"import pathlib,yaml; p=pathlib.Path('.github/workflows/sync.yml'); data=yaml.safe_load(p.read_text(encoding='utf-8')); jobs=data['jobs']; assert data['permissions']['contents']=='read'; assert jobs['publish-staging-release']['permissions']['contents']=='write'; assert jobs['validate-r2-config']; assert jobs['download-windows']['needs']=='validate-r2-config'; assert 'if' not in jobs['mirror-codex-desktop-r2']; assert jobs['mirror-codexplusplus-r2']['needs']=='validate-r2-config'; assert str(jobs['mirror-codex-desktop'].get('if','')).strip().lower() in ('false','${{ false }}'); assert str(jobs['mirror-codexplusplus'].get('if','')).strip().lower() in ('false','${{ false }}'); smoke=yaml.safe_load(pathlib.Path('.github/workflows/gitee-api-smoke.yml').read_text(encoding='utf-8')); assert str(smoke['jobs']['verify-attachment-upload'].get('if','')).strip().lower() in ('false','${{ false }}')\""
+cmd = "python -c \"import pathlib,yaml; p=pathlib.Path('.github/workflows/sync.yml'); data=yaml.safe_load(p.read_text(encoding='utf-8')); jobs=data['jobs']; assert data['permissions']['contents']=='read'; assert 'publish-staging-release' not in jobs; assert jobs['validate-r2-config']; assert jobs['download-windows']['needs']=='validate-r2-config'; assert jobs['download-windows']['steps'][-1]['with']['compression-level']==0; assert 'if' not in jobs['mirror-codex-desktop-r2']; assert jobs['mirror-codexplusplus-r2']['needs']=='validate-r2-config'; assert str(jobs['mirror-codex-desktop'].get('if','')).strip().lower() in ('false','${{ false }}'); assert str(jobs['mirror-codexplusplus'].get('if','')).strip().lower() in ('false','${{ false }}'); smoke=yaml.safe_load(pathlib.Path('.github/workflows/gitee-api-smoke.yml').read_text(encoding='utf-8')); assert str(smoke['jobs']['verify-attachment-upload'].get('if','')).strip().lower() in ('false','${{ false }}')\""
 
 [[checks]]
 cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8').lower(); publisher=pathlib.Path('scripts/publish-r2-mirror.sh').read_text(encoding='utf-8').lower(); assert 'gitee_token' not in workflow.split('mirror-codex-desktop-r2:',1)[1].split('mirror-codexplusplus:',1)[0]; assert 'gitee_token' not in workflow.split('mirror-codexplusplus-r2:',1)[1]; assert 'gitee' not in publisher; assert 'https://download.z8.hk' in publisher; assert 'set -euo pipefail; upload_part' in publisher; assert 'set -euo pipefail; verify_part' in publisher; assert 'public,max-age=31536000,immutable' in publisher; assert '--cache-control ' + chr(39) + 'no-cache' + chr(39) in publisher; assert 'signtool.exe' in workflow; assert 'appxmanifest.xml' in workflow\""
@@ -62,6 +62,10 @@ cmd = "git diff --check"
   `/latest.json`, and make the remaining immutable paths below `/z8-launch/`
   cache-eligible while respecting origin `Cache-Control`. A repeated
   `cf-cache-status: DYNAMIC` does not count as CDN acceleration proof.
+- The workflow does not create a disposable GitHub Release for the verified
+  Windows package. The short-lived Actions artifact is only an internal
+  hand-off between the Windows resolver and the R2 publisher; R2 is the sole
+  public artifact transport and the repository token remains contents-read.
 - The script keeps the logical manifest identifiers `z8hk/codex-mirror` and
   `z8hk/codexplusplus-mirror` for client compatibility, but it never contacts
   Gitee and never requires `GITEE_TOKEN`.
@@ -81,6 +85,9 @@ cmd = "git diff --check"
   and verify the Windows MSIX package identity, resolved version, and its
   Authenticode chain
   before any R2 upload.
+- CHG-R2-WF-003: remove the redundant GitHub Release staging upload and disable
+  compression for the already-compressed MSIX Actions hand-off, reducing
+  transfer time and preserving a contents-read workflow boundary.
 - EFF-R2-WF-001 must-change: a scheduled run succeeds with only R2 credentials
   and repository variables.
 - EFF-R2-PUB-001 must-change: clients can resolve one fixed latest URL while
@@ -92,3 +99,5 @@ cmd = "git diff --check"
   Actions run.
 - CHK-R2-003: Bash syntax and immutable-prefix/idempotency checks for the
   publisher.
+- CHK-R2-004: workflow contains no GitHub Release staging job and uses
+  `compression-level: 0` for the MSIX hand-off.

@@ -169,47 +169,10 @@ jobs:
           name: codex-msix-x64
           path: artifacts/
           if-no-files-found: error
+          # MSIX is already compressed; avoid spending runner time on a
+          # second compression pass before the R2 publisher downloads it.
+          compression-level: 0
           retention-days: 1
-
-  publish-staging-release:
-    name: Publish immutable Codex Desktop staging release
-    needs: download-windows
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - name: Download verified package
-        uses: actions/download-artifact@v4
-        with:
-          name: codex-msix-x64
-          path: staging
-      - name: Revalidate and publish
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          metadata='staging/Codex-windows-x64.json'
-          package='staging/Codex-windows-x64.msix'
-          version="$(jq -r '.version // empty' "${metadata}")"
-          expected_size="$(jq -r '.sizeBytes // 0' "${metadata}")"
-          expected_sha="$(jq -r '.sha256 // empty' "${metadata}")"
-          [[ "$(jq -r '.signatureStatus // empty' "${metadata}")" == 'Valid' ]]
-          [[ "$(jq -r '.publisher // empty' "${metadata}")" == 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' ]]
-          [[ "${version}" =~ ^[0-9]+(\.[0-9]+)+$ ]]
-          [[ "$(stat -c '%s' "${package}")" == "${expected_size}" ]]
-          [[ "$(sha256sum "${package}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
-          tag="codex-desktop-${version}"
-          title="Codex Desktop Windows x64 ${version}"
-          notes='Official Microsoft Store MSIX staged for the Z8 Cloudflare R2 mirror. Z8 Launch verifies part hashes, the reconstructed SHA-256, and the Windows publisher signature.'
-          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}" --latest=false
-          else
-            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "${title}" --notes "${notes}" --latest=false
-          fi
-          gh release upload "${tag}" "${package}" "${metadata}" --repo "${GITHUB_REPOSITORY}" --clobber
-          echo "Staged ${tag}: ${expected_size} bytes, SHA-256 ${expected_sha}"
 
   mirror-codex-desktop:
     name: '[Disabled] Historical Codex Desktop Gitee mirror'
