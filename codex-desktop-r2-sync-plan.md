@@ -51,6 +51,10 @@ cmd = "git diff --check"
   deletion step: keep the two stable pointers permanently and expire versioned
   parts/manifests after 90 days. This bounds storage cost without risking the
   current release during a sync.
+- Cloudflare caching is also an owner-side rule: bypass every path ending in
+  `/latest.json`, and make the remaining immutable paths below `/z8-launch/`
+  cache-eligible while respecting origin `Cache-Control`. A repeated
+  `cf-cache-status: DYNAMIC` does not count as CDN acceleration proof.
 - The script keeps the logical manifest identifiers `z8hk/codex-mirror` and
   `z8hk/codexplusplus-mirror` for client compatibility, but it never contacts
   Gitee and never requires `GITEE_TOKEN`.
