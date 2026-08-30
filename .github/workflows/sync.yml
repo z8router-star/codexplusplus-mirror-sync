@@ -33,9 +33,22 @@ jobs:
           : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY secret is required}"
           : "${R2_BUCKET:?R2_BUCKET variable is required}"
           : "${R2_PUBLIC_BASE_URL:?R2_PUBLIC_BASE_URL variable is required}"
-          [[ "${R2_ACCOUNT_ID}" =~ ^[A-Fa-f0-9]{32}$ ]]
-          [[ "${R2_BUCKET}" =~ ^[A-Za-z0-9._-]{1,63}$ ]]
-          [[ "${R2_PUBLIC_BASE_URL}" == 'https://download.z8.hk' ]]
+          if [[ "${R2_ACCOUNT_ID}" == cfat_* ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be the 32-hex account ID, not a Cloudflare API token (cfat_...)'
+            exit 1
+          fi
+          if [[ ! "${R2_ACCOUNT_ID}" =~ ^[A-Fa-f0-9]{32}$ ]]; then
+            echo '::error::CLOUDFLARE_ACCOUNT_ID must be the 32-hex account ID from the R2 S3 endpoint host'
+            exit 1
+          fi
+          if [[ ! "${R2_BUCKET}" =~ ^[A-Za-z0-9._-]{1,63}$ ]]; then
+            echo '::error::R2_BUCKET contains unsupported characters'
+            exit 1
+          fi
+          if [[ "${R2_PUBLIC_BASE_URL}" != 'https://download.z8.hk' ]]; then
+            echo '::error::R2_PUBLIC_BASE_URL must be exactly https://download.z8.hk'
+            exit 1
+          fi
 
   download-windows:
     name: Resolve official Codex Desktop Windows x64
