@@ -74,8 +74,10 @@ cmd = "git diff --check"
   public artifact transport and the repository token remains contents-read.
 - Repeated-release checks use the bounded `VERIFY_PARALLELISM` worker pool, and
   changed-release uploads reuse the size/SHA-256 computed while splitting each
-  part. The optimization changes local runner work only; it does not skip an
-  R2 HEAD check, public re-download, or integrity gate.
+  part. The optimization changes local runner work only; the healthy fast path
+  keeps its bounded HEAD checks, while a repair path may inspect all remaining
+  parts before republishing. Public re-download remains the final integrity
+  guard, and no integrity gate is skipped.
 - Codex++'s three independent upstream assets are downloaded and hashed in
   bounded three-way child jobs, then combined only after every child succeeds.
   Each child still enforces the exact release URL, size, and SHA-256 digest.
