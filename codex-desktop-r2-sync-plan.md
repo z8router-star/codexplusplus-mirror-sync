@@ -32,6 +32,12 @@ cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync
 cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'); resolver=pathlib.Path('scripts/resolve-codex-msix.ps1').read_text(encoding='utf-8'); assert 'downloadCandidates' in workflow; assert 'candidateUri.Scheme -notin' in workflow; assert 'packageVersion' in workflow; assert 'candidateUri.Scheme -notin' in resolver\""
 
 [[checks]]
+cmd = "python -c \"import pathlib; s=pathlib.Path('scripts/publish-r2-mirror.sh').read_text(encoding='utf-8'); assert 'xargs -0 -r -n 1 -P' in s; assert 'mv --' in s; assert 'upload_queue' in s; assert 'xargs -0 -r -n 3 -P' in s; assert 'upload_part ' + chr(34) + chr(36) + '1' + chr(34) in s\""
+
+[[checks]]
+cmd = "python -c \"import pathlib; s=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'); assert 'pids=()' in s; assert 'wait ' + chr(34) + chr(36) + '{pid}' + chr(34) in s; assert 'asset-specs/*.json' in s; assert 'mkdir -p upstream-assets asset-specs' in s\""
+
+[[checks]]
 cmd = "git diff --check"
 ```
 
@@ -66,6 +72,13 @@ cmd = "git diff --check"
   Windows package. The short-lived Actions artifact is only an internal
   hand-off between the Windows resolver and the R2 publisher; R2 is the sole
   public artifact transport and the repository token remains contents-read.
+- Repeated-release checks use the bounded `VERIFY_PARALLELISM` worker pool, and
+  changed-release uploads reuse the size/SHA-256 computed while splitting each
+  part. The optimization changes local runner work only; it does not skip an
+  R2 HEAD check, public re-download, or integrity gate.
+- Codex++'s three independent upstream assets are downloaded and hashed in
+  bounded three-way child jobs, then combined only after every child succeeds.
+  Each child still enforces the exact release URL, size, and SHA-256 digest.
 - The script keeps the logical manifest identifiers `z8hk/codex-mirror` and
   `z8hk/codexplusplus-mirror` for client compatibility, but it never contacts
   Gitee and never requires `GITEE_TOKEN`.
@@ -88,6 +101,12 @@ cmd = "git diff --check"
 - CHG-R2-WF-003: remove the redundant GitHub Release staging upload and disable
   compression for the already-compressed MSIX Actions hand-off, reducing
   transfer time and preserving a contents-read workflow boundary.
+- CHG-R2-PUB-003: parallelize unchanged-part metadata checks within the existing
+  verification limit and pass split-part size/digest sidecars to upload workers,
+  avoiding duplicate local copies and hashes without changing uploaded bytes.
+- CHG-R2-WF-004: download and hash the three Codex++ targets concurrently with
+  explicit child-job waits, while preserving exact URL, size, digest, and
+  post-publish verification gates.
 - EFF-R2-WF-001 must-change: a scheduled run succeeds with only R2 credentials
   and repository variables.
 - EFF-R2-PUB-001 must-change: clients can resolve one fixed latest URL while
@@ -101,3 +120,8 @@ cmd = "git diff --check"
   publisher.
 - CHK-R2-004: workflow contains no GitHub Release staging job and uses
   `compression-level: 0` for the MSIX hand-off.
+- CHK-R2-005: publisher syntax and static assertions prove bounded parallel
+  unchanged-part checks, same-filesystem part moves, and sidecar size/digest
+  arguments to upload workers.
+- CHK-R2-006: workflow syntax/static checks prove three Codex++ child jobs are
+  awaited before the combined asset specification is written.

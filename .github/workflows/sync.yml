@@ -364,25 +364,36 @@ jobs:
           UPSTREAM_RELEASE_URL="$(jq -r '.html_url // empty' <<<"${upstream}")"
           [[ "${MIRROR_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "${UPSTREAM_RELEASE_URL}" == "https://github.com/BigPizzaV3/CodexPlusPlus/releases/tag/${MIRROR_TAG}" ]]
-          mkdir -p upstream-assets
-          specs='[]'
+          mkdir -p upstream-assets asset-specs
+          pids=()
+          asset_index=0
           for suffix in windows-x64-setup.exe macos-x64.dmg macos-arm64.dmg; do
-            filename="CodexPlusPlus-${MIRROR_VERSION}-${suffix}"
-            asset="$(jq -c --arg filename "${filename}" '[.assets[] | select(.name == $filename)] | if length == 1 then .[0] else error("asset missing or duplicated") end' <<<"${upstream}")"
-            url="$(jq -r '.browser_download_url' <<<"${asset}")"
-            expected_url="https://github.com/BigPizzaV3/CodexPlusPlus/releases/download/${MIRROR_TAG}/${filename}"
-            [[ "${url}" == "${expected_url}" ]]
-            expected_size="$(jq -r '.size' <<<"${asset}")"
-            expected_sha="$(jq -r '.digest // empty | sub("^sha256:"; "") | ascii_downcase' <<<"${asset}")"
-            [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
-            [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
-            path="${GITHUB_WORKSPACE}/upstream-assets/${filename}"
-            curl -fsSL --retry 4 --retry-all-errors -o "${path}" "${url}"
-            [[ "$(stat -c '%s' "${path}")" == "${expected_size}" ]]
-            [[ "$(sha256sum "${path}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
-            spec="$(jq -n --arg filename "${filename}" --arg path "${path}" --arg upstreamUrl "${url}" --arg sha256 "${expected_sha}" --argjson sizeBytes "${expected_size}" '{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}')"
-            specs="$(jq -c --argjson spec "${spec}" '. + [$spec]' <<<"${specs}")"
+            asset_index=$((asset_index + 1))
+            (
+              set -euo pipefail
+              filename="CodexPlusPlus-${MIRROR_VERSION}-${suffix}"
+              asset="$(jq -c --arg filename "${filename}" '[.assets[] | select(.name == $filename)] | if length == 1 then .[0] else error("asset missing or duplicated") end' <<<"${upstream}")"
+              url="$(jq -r '.browser_download_url' <<<"${asset}")"
+              expected_url="https://github.com/BigPizzaV3/CodexPlusPlus/releases/download/${MIRROR_TAG}/${filename}"
+              [[ "${url}" == "${expected_url}" ]]
+              expected_size="$(jq -r '.size' <<<"${asset}")"
+              expected_sha="$(jq -r '.digest // empty | sub("^sha256:"; "") | ascii_downcase' <<<"${asset}")"
+              [[ "${expected_size}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${expected_sha}" =~ ^[0-9a-f]{64}$ ]]
+              path="${GITHUB_WORKSPACE}/upstream-assets/${filename}"
+              curl -fsSL --retry 4 --retry-all-errors -o "${path}" "${url}"
+              [[ "$(stat -c '%s' "${path}")" == "${expected_size}" ]]
+              [[ "$(sha256sum "${path}" | awk '{print tolower($1)}')" == "${expected_sha}" ]]
+              jq -n --arg filename "${filename}" --arg path "${path}" --arg upstreamUrl "${url}" --arg sha256 "${expected_sha}" --argjson sizeBytes "${expected_size}" \
+                '{filename:$filename,path:$path,upstreamUrl:$upstreamUrl,sizeBytes:$sizeBytes,sha256:$sha256}' \
+                > "asset-specs/$(printf '%02d' "${asset_index}").json"
+            ) &
+            pids+=("$!")
           done
+          for pid in "${pids[@]}"; do
+            wait "${pid}"
+          done
+          specs="$(jq -s -c 'sort_by(.filename)' asset-specs/*.json)"
           printf '%s\n' "${specs}" > codexplusplus-assets.json
           export MIRROR_TAG MIRROR_VERSION UPSTREAM_RELEASE_URL
           export ASSET_SPEC_FILE="${GITHUB_WORKSPACE}/codexplusplus-assets.json"

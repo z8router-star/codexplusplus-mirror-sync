@@ -146,13 +146,22 @@ if curl -fsSL --connect-timeout 20 --max-time 60 --retry 2 --retry-all-errors \
     exit 1
   fi
   if manifest_matches_assets "${current_manifest}"; then
-    all_parts_present=true
-    while IFS=$'\t' read -r mirror_url expected_size expected_sha; do
-      if ! part_metadata_matches "${mirror_url}" "${expected_size}" "${expected_sha}"; then
-        all_parts_present=false
-        break
-      fi
-    done < <(jq -r '.assets[].parts[] | [.mirrorUrl,.sizeBytes,.sha256] | @tsv' "${current_manifest}")
+    existing_parts="${work}/existing-parts.null"
+    jq -r '.assets[].parts[] | [.mirrorUrl,.sizeBytes,.sha256] | @tsv' "${current_manifest}" |
+      tr '\n' '\0' > "${existing_parts}"
+    check_existing_part() {
+      local row="$1" mirror_url expected_size expected_sha
+      IFS=$'\t' read -r mirror_url expected_size expected_sha <<<"${row}"
+      part_metadata_matches "${mirror_url}" "${expected_size}" "${expected_sha}"
+    }
+    export -f check_existing_part part_metadata_matches
+    export public_prefix R2_BUCKET R2_ENDPOINT
+    if xargs -0 -r -n 1 -P "${VERIFY_PARALLELISM}" \
+      bash -c 'set -euo pipefail; check_existing_part "$1"' _ < "${existing_parts}"; then
+      all_parts_present=true
+    else
+      all_parts_present=false
+    fi
     if [[ "${versioned_manifest_available}" == true && "${all_parts_present}" == true ]]; then
       echo "R2 mirror already current: ${MIRROR_ID} ${MIRROR_TAG}"
       exit 0
@@ -162,7 +171,9 @@ fi
 
 parts_dir="${work}/parts"
 meta_dir="${work}/part-meta"
+upload_queue="${work}/upload-queue.null"
 mkdir -p "${parts_dir}" "${meta_dir}"
+: > "${upload_queue}"
 part_index=0
 while IFS=$'\t' read -r filename path _ _ _; do
   asset_dir="${work}/split-${part_index}"
@@ -172,9 +183,12 @@ while IFS=$'\t' read -r filename path _ _ _; do
     suffix="${raw_part##*-}"
     part_name="${filename}.part-${suffix}"
     local_part="${parts_dir}/${part_name}"
-    cp "${raw_part}" "${local_part}"
+    # split and parts_dir share the same mktemp filesystem; moving avoids a
+    # second full-byte local copy before the upload workers read the part.
+    mv -- "${raw_part}" "${local_part}"
     part_size="$(stat -c '%s' "${local_part}")"
     part_sha="$(sha256sum "${local_part}" | awk '{print tolower($1)}')"
+    printf '%s\0%s\0%s\0' "${local_part}" "${part_size}" "${part_sha}" >> "${upload_queue}"
     object_key="${R2_PREFIX}/${part_name}"
     mirror_url="${R2_PUBLIC_BASE_URL}/${object_key}"
     jq -n \
@@ -190,17 +204,19 @@ while IFS=$'\t' read -r filename path _ _ _; do
 done < <(jq -r '.[] | [.filename,.path,.upstreamUrl,(.sizeBytes|tostring),.sha256] | @tsv' "${normalized_assets}")
 
 upload_part() {
-  local part name object_key part_size part_sha head_json existing_path existing_size existing_sha
+  local part expected_size expected_sha name object_key part_size head_json existing_path existing_size existing_sha
   part="$1"
+  expected_size="$2"
+  expected_sha="$3"
   name="${part##*/}"
   part_size="$(stat -c '%s' "${part}")"
-  part_sha="$(sha256sum "${part}" | awk '{print tolower($1)}')"
+  [[ "${part_size}" == "${expected_size}" ]]
   object_key="${R2_PREFIX}/${name}"
   if head_json="$(aws s3api head-object \
     --bucket "${R2_BUCKET}" --key "${object_key}" \
     --endpoint-url "${R2_ENDPOINT}" --region auto --output json 2>/dev/null)"; then
-    if [[ "$(jq -r '.ContentLength // 0' <<<"${head_json}")" == "${part_size}" \
-      && "$(jq -r '.Metadata.sha256 // empty' <<<"${head_json}" | tr '[:upper:]' '[:lower:]')" == "${part_sha}" ]]; then
+    if [[ "$(jq -r '.ContentLength // 0' <<<"${head_json}")" == "${expected_size}" \
+      && "$(jq -r '.Metadata.sha256 // empty' <<<"${head_json}" | tr '[:upper:]' '[:lower:]')" == "${expected_sha}" ]]; then
       echo "R2 part already verified ${name}"
       return 0
     fi
@@ -212,7 +228,7 @@ upload_part() {
     existing_size="$(stat -c '%s' "${existing_path}")"
     existing_sha="$(sha256sum "${existing_path}" | awk '{print tolower($1)}')"
     rm -f "${existing_path}"
-    if [[ "${existing_size}" != "${part_size}" || "${existing_sha}" != "${part_sha}" ]]; then
+    if [[ "${existing_size}" != "${expected_size}" || "${existing_sha}" != "${expected_sha}" ]]; then
       echo "::error::Immutable R2 part differs from the verified upstream bytes: ${name}"
       return 1
     fi
@@ -222,14 +238,14 @@ upload_part() {
     --endpoint-url "${R2_ENDPOINT}" \
     --region auto \
     --content-type application/octet-stream \
-    --metadata "sha256=${part_sha}" \
+    --metadata "sha256=${expected_sha}" \
     --cache-control 'public,max-age=31536000,immutable' \
     --only-show-errors
 }
 export -f upload_part
 export work public_prefix R2_BUCKET R2_PREFIX R2_ENDPOINT
-find "${parts_dir}" -maxdepth 1 -type f -print0 | \
-  xargs -0 -n 1 -P "${UPLOAD_PARALLELISM}" bash -c 'set -euo pipefail; upload_part "$1"' _
+xargs -0 -r -n 3 -P "${UPLOAD_PARALLELISM}" \
+  bash -c 'set -euo pipefail; upload_part "$1" "$2" "$3"' _ < "${upload_queue}"
 
 verify_part() {
   local meta filename url expected_size expected_sha downloaded actual_size actual_sha
