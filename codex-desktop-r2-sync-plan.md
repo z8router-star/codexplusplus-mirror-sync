@@ -33,10 +33,16 @@ cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync
 cmd = "python -c \"import pathlib; workflow=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'); resolver=pathlib.Path('scripts/resolve-codex-msix.ps1').read_text(encoding='utf-8'); assert 'downloadCandidates' in workflow; assert 'candidateUri.Scheme -notin' in workflow; assert 'packageVersion' in workflow; assert 'candidateUri.Scheme -notin' in resolver; assert 'actions/checkout@v4' not in workflow; assert 'actions/upload-artifact@v4' not in workflow; assert 'actions/download-artifact@v4' not in workflow; assert 'actions/checkout@v7' in workflow; assert 'actions/upload-artifact@v7' in workflow; assert 'actions/download-artifact@v8' in workflow; assert '757b9678cd2c774e8c305febbfb6fc52ce822d33cc000cb4864a8147c69aa923' in resolver; assert resolver.index('Get-FileHash') < resolver.index('Invoke-Expression'); assert resolver.index('Invoke-WebRequest -Uri $resolverUri') < resolver.index('$PSDefaultParameterValues[$restSkipKey] = $true')\""
 
 [[checks]]
+cmd = "python -c \"import pathlib,yaml; jobs=yaml.safe_load(pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'))['jobs']; steps=[step for job in jobs.values() for step in job.get('steps',[]) if step.get('uses') == 'actions/checkout@v7']; assert steps and all(step.get('with',{}).get('persist-credentials') is False for step in steps)\""
+
+[[checks]]
 cmd = "python -c \"import pathlib; s=pathlib.Path('scripts/publish-r2-mirror.sh').read_text(encoding='utf-8'); assert 'xargs -0 -r -n 1 -P' in s; assert 'mv --' in s; assert 'upload_queue' in s; assert 'xargs -0 -r -n 3 -P' in s; assert 'upload_part ' + chr(34) + chr(36) + '1' + chr(34) in s\""
 
 [[checks]]
 cmd = "python -c \"import pathlib; s=pathlib.Path('.github/workflows/sync.yml').read_text(encoding='utf-8'); assert 'pids=()' in s; assert 'wait ' + chr(34) + chr(36) + '{pid}' + chr(34) in s; assert 'asset-specs/*.json' in s; assert 'mkdir -p upstream-assets asset-specs' in s\""
+
+[[checks]]
+cmd = "python -c \"import pathlib; s=pathlib.Path('scripts/publish-r2-mirror.sh').read_text(encoding='utf-8'); stable='aws s3 cp ' + chr(34) + '${manifest}' + chr(34) + ' ' + chr(34) + 's3://${R2_BUCKET}/${R2_LATEST_KEY}' + chr(34); assert s.index('verify_public_object ' + chr(34) + '${versioned_latest_url}' + chr(34)) < s.index(stable); assert 'Restoring the previous stable R2 pointer' in s; assert 'published_versioned_manifest' in s\""
 
 [[checks]]
 cmd = "git diff --check"
@@ -113,6 +119,9 @@ cmd = "git diff --check"
 - CHG-R2-SEC-001: run GitHub's Node 24 action majors and verify the exact
   SHA-256 of the PowerShell Gallery resolver before evaluating its functions;
   scope the FE3 certificate workaround to that pinned metadata call only.
+- CHG-R2-PUB-004: verify the newly uploaded versioned manifest through its
+  public URL before switching the mutable stable pointer; verify the stable
+  read after switching and attempt restoration of the prior pointer on failure.
 - EFF-R2-WF-001 must-change: a scheduled run succeeds with only R2 credentials
   and repository variables.
 - EFF-R2-PUB-001 must-change: clients can resolve one fixed latest URL while

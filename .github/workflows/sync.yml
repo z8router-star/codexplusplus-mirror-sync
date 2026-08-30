@@ -58,6 +58,8 @@ jobs:
     steps:
       - name: Check out resolver
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download and verify complete MSIX
         shell: pwsh
         run: |
@@ -194,6 +196,8 @@ jobs:
     steps:
       - name: Check out publisher
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download verified package
         uses: actions/download-artifact@v8
         with:
@@ -243,6 +247,8 @@ jobs:
     steps:
       - name: Check out publisher
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download verified package
         uses: actions/download-artifact@v8
         with:
@@ -287,6 +293,8 @@ jobs:
     steps:
       - name: Check out publisher
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download, verify, and mirror stable upstream assets
         shell: bash
         run: |
@@ -347,6 +355,8 @@ jobs:
     steps:
       - name: Check out publisher
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download, verify, and publish stable upstream assets
         shell: bash
         env:

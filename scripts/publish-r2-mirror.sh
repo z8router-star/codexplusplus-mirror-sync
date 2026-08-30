@@ -299,29 +299,68 @@ jq -n \
   '{schemaVersion:3,mirrorProvider:"cloudflare_r2",upstreamRepository:$upstreamRepository,tag:$tag,version:$version,upstreamReleaseUrl:$upstreamReleaseUrl,mirrorRepository:$mirrorRepository,generatedAt:$generatedAt,assets:$assets}' \
   > "${manifest}"
 
-aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${R2_PREFIX}/latest.json" \
-  --endpoint-url "${R2_ENDPOINT}" --region auto \
-  --content-type application/json --cache-control 'no-cache' --only-show-errors
-
-# Keep the immutable versioned manifest for auditability, then atomically
-# replace the stable pointer only after every part and the versioned object
-# have been uploaded. A failed pointer upload leaves the previous release
-# discoverable instead of exposing a partial release.
-aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${R2_LATEST_KEY}" \
+versioned_manifest_key="${R2_PREFIX}/latest.json"
+aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${versioned_manifest_key}" \
   --endpoint-url "${R2_ENDPOINT}" --region auto \
   --content-type application/json --cache-control 'no-cache' --only-show-errors
 
 expected_manifest_sha="$(sha256sum "${manifest}" | awk '{print tolower($1)}')"
+verify_public_object() {
+  local url="$1" output="$2" expected_sha="$3" actual_sha
+  for attempt in $(seq 1 30); do
+    rm -f "${output}"
+    if curl -fsSL --connect-timeout 20 --max-time 60 --retry 1 --retry-all-errors \
+      -H 'Cache-Control: no-cache' \
+      -o "${output}" "${url}"; then
+      actual_sha="$(sha256sum "${output}" | awk '{print tolower($1)}')"
+      if [[ "${actual_sha}" == "${expected_sha}" ]]; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+# Verify the immutable versioned manifest through the same public URL clients
+# use before touching the mutable stable pointer. This prevents a failed or
+# stale versioned object from becoming discoverable as the current release.
+published_versioned_manifest="${work}/published-versioned.json"
+if ! verify_public_object "${versioned_latest_url}" "${published_versioned_manifest}" "${expected_manifest_sha}"; then
+  echo "::error::Versioned R2 manifest failed public re-download verification"
+  exit 1
+fi
+
+# Preserve a valid prior pointer so a failed public read after the switch can
+# be repaired without leaving a newly published but unverifiable release as
+# the stable result. R2 object replacement itself is atomic, but the public
+# edge may take time to observe it, so this is an explicit two-phase handoff.
+previous_stable_manifest="${work}/previous-stable.json"
+previous_stable_sha=''
+previous_stable_available=false
+if [[ -s "${current_manifest}" ]] && jq -e 'type == "object"' "${current_manifest}" >/dev/null 2>&1; then
+  cp -- "${current_manifest}" "${previous_stable_manifest}"
+  previous_stable_sha="$(sha256sum "${previous_stable_manifest}" | awk '{print tolower($1)}')"
+  previous_stable_available=true
+fi
+
+aws s3 cp "${manifest}" "s3://${R2_BUCKET}/${R2_LATEST_KEY}" \
+  --endpoint-url "${R2_ENDPOINT}" --region auto \
+  --content-type application/json --cache-control 'no-cache' --only-show-errors
+
 published_manifest="${work}/published-latest.json"
-for attempt in $(seq 1 30); do
-  if curl -fsSL --connect-timeout 20 --max-time 60 --retry 1 --retry-all-errors \
-    -H 'Cache-Control: no-cache' \
-    -o "${published_manifest}" "${latest_url}"; then
-    published_sha="$(sha256sum "${published_manifest}" | awk '{print tolower($1)}')"
-    [[ "${published_sha}" == "${expected_manifest_sha}" ]] && break
+if ! verify_public_object "${latest_url}" "${published_manifest}" "${expected_manifest_sha}"; then
+  echo "::error::Stable R2 pointer failed public re-download verification"
+  if [[ "${previous_stable_available}" == true ]]; then
+    echo "Restoring the previous stable R2 pointer"
+    aws s3 cp "${previous_stable_manifest}" "s3://${R2_BUCKET}/${R2_LATEST_KEY}" \
+      --endpoint-url "${R2_ENDPOINT}" --region auto \
+      --content-type application/json --cache-control 'no-cache' --only-show-errors || true
+    restored_manifest="${work}/restored-latest.json"
+    if ! verify_public_object "${latest_url}" "${restored_manifest}" "${previous_stable_sha}"; then
+      echo "::error::Previous stable R2 pointer could not be publicly restored"
+    fi
   fi
-  sleep 5
-done
-[[ -f "${published_manifest}" ]]
-[[ "$(sha256sum "${published_manifest}" | awk '{print tolower($1)}')" == "${expected_manifest_sha}" ]]
+  exit 1
+fi
 echo "Published verified R2 mirror ${MIRROR_ID} ${MIRROR_TAG} with ${part_index} raw parts"
